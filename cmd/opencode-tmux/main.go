@@ -18,14 +18,15 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/sst/opencode-sdk-go"
-	"github.com/sst/opencode-sdk-go/option"
 	tmuxconfig "github.com/opencode/tmux_coder/internal/config"
 	"github.com/opencode/tmux_coder/internal/ipc"
+	panelregistry "github.com/opencode/tmux_coder/internal/panel"
 	"github.com/opencode/tmux_coder/internal/persistence"
 	"github.com/opencode/tmux_coder/internal/state"
 	"github.com/opencode/tmux_coder/internal/theme"
 	"github.com/opencode/tmux_coder/internal/types"
+	"github.com/sst/opencode-sdk-go"
+	"github.com/sst/opencode-sdk-go/option"
 )
 
 // TmuxOrchestrator manages the tmux session and panels
@@ -728,13 +729,32 @@ func (orch *TmuxOrchestrator) startConfigPanelApplications() error {
 	return fmt.Errorf("panels failed health check after startup")
 }
 
-func resolvePanelAppName(panel tmuxconfig.Panel) (string, error) {
-	custom := strings.TrimSpace(panel.Command)
+func resolvePanelAppName(panelCfg tmuxconfig.Panel) (string, error) {
+	custom := strings.TrimSpace(panelCfg.Command)
 	if custom != "" {
 		return custom, nil
 	}
 
-	key := strings.ToLower(strings.TrimSpace(panel.Type))
+	if module := strings.TrimSpace(panelCfg.Module); module != "" {
+		inst, meta, err := panelregistry.Resolve(module)
+		if err != nil {
+			return "", fmt.Errorf("resolve panel module %s: %w", module, err)
+		}
+		if len(meta.DefaultCommand) == 0 {
+			return "", fmt.Errorf("panel module %s has no default command", module)
+		}
+		_ = inst
+		return meta.DefaultCommand[0], nil
+	}
+
+	key := strings.ToLower(strings.TrimSpace(panelCfg.Type))
+	if key != "" {
+		if _, meta, err := panelregistry.Resolve(key); err == nil {
+			if len(meta.DefaultCommand) > 0 {
+				return meta.DefaultCommand[0], nil
+			}
+		}
+	}
 	switch key {
 	case "sessions":
 		return "opencode-sessions", nil
@@ -751,7 +771,7 @@ func resolvePanelAppName(panel tmuxconfig.Panel) (string, error) {
 		return shell, nil
 	}
 
-	return "", fmt.Errorf("unsupported panel type: %s", panel.Type)
+	return "", fmt.Errorf("unsupported panel type: %s", panelCfg.Type)
 }
 
 // startPanelApp starts an application in a specific tmux pane
@@ -883,7 +903,6 @@ func (orch *TmuxOrchestrator) killTmuxSession() error {
 	cmd.Run() // Ignore errors as session might not exist
 	return nil
 }
-
 
 // attachToSession attaches to the tmux session
 func (orch *TmuxOrchestrator) attachToSession() error {
@@ -1124,19 +1143,24 @@ func main() {
 	// Print status
 	orchestrator.printStatus()
 
-	// Attach to session if stdin is a terminal and not in server-only mode
+	// Attach to session if stdin is a terminal and not in server-only mode.
+	// Keep the orchestrator running even after the caller detaches so other
+	// clients can connect to the same tmux session.
 	if isTerminal() && !serverOnly {
-		log.Printf("Attaching to tmux session...")
-		if err := orchestrator.attachToSession(); err != nil {
-			log.Printf("Failed to attach to session: %v", err)
-		}
-	} else {
-		// Wait for shutdown signal (for server-only mode or non-terminal)
-		if serverOnly {
-			log.Printf("Server-only mode: waiting for shutdown signal...")
-		}
-		orchestrator.waitForShutdown()
+		go func() {
+			log.Printf("Attaching to tmux session...")
+			if err := orchestrator.attachToSession(); err != nil {
+				log.Printf("Failed to attach to session: %v", err)
+				return
+			}
+			log.Printf("Tmux session detached; orchestrator continues running until interrupted")
+		}()
+	} else if serverOnly {
+		log.Printf("Server-only mode: waiting for shutdown signal...")
 	}
+
+	log.Printf("Tmux orchestrator running; press Ctrl+C to stop.")
+	orchestrator.waitForShutdown()
 
 	// Cleanup
 	if err := orchestrator.Stop(); err != nil {

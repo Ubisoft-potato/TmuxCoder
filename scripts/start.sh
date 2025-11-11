@@ -13,6 +13,7 @@ Usage: scripts/start.sh [options] [-- <opencode-tmux args>]
 Options:
   --skip-build       跳过 Go 构建步骤，直接运行已有二进制
   --server <URL>     设置 OPENCODE_SERVER（默认 http://127.0.0.1:62435）
+  --panels <list>    仅构建指定面板，逗号分隔（sessions,messages,input）
   -h, --help         显示本帮助
 
 其它参数会原样传给 opencode-tmux，可用于添加 --server-only 等标志。
@@ -21,6 +22,7 @@ EOF
 
 SKIP_BUILD=0
 SERVER_URL="${OPENCODE_SERVER:-http://127.0.0.1:62435}"
+REQUESTED_PANELS=""
 declare -a FORWARD_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -35,6 +37,14 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       SERVER_URL="$2"
+      shift 2
+      ;;
+    --panels)
+      if [[ $# -lt 2 ]]; then
+        echo "错误：--panels 需要提供以逗号分隔的面板列表，例如 sessions,messages,input" >&2
+        exit 1
+      fi
+      REQUESTED_PANELS="$2"
       shift 2
       ;;
     -h|--help)
@@ -88,10 +98,36 @@ if [[ $SKIP_BUILD -eq 0 ]]; then
     "cmd/opencode-messages:dist/messages-pane"
     "cmd/opencode-input:dist/input-pane"
   )
+
+  declare -a ENABLED_PANELS
+  if [[ -n "$REQUESTED_PANELS" ]]; then
+    IFS=',' read -r -a ENABLED_PANELS <<<"$REQUESTED_PANELS"
+  else
+    ENABLED_PANELS=(sessions messages input)
+  fi
+
+  should_build_panel() {
+    local name="$1"
+    for panel in "${ENABLED_PANELS[@]}"; do
+      if [[ "$panel" == "$name" ]]; then
+        return 0
+      fi
+    done
+    return 1
+  }
+
   pushd "${REPO_ROOT}" >/dev/null
   for target in "${BUILD_TARGETS[@]}"; do
     pkg="${target%%:*}"
     output_rel="${target#*:}"
+    base="$(basename "$pkg")"
+    panel_name="${base#opencode-}"
+    if [[ "$base" != "opencode-tmux" ]]; then
+      if ! should_build_panel "$panel_name"; then
+        echo "  -> 跳过 ${pkg}（未在 --panels 列表中）"
+        continue
+      fi
+    fi
     output="${REPO_ROOT}/${pkg}/${output_rel}"
     mkdir -p "$(dirname "$output")"
     echo "  -> go build ./${pkg} -> ${pkg}/${output_rel}"

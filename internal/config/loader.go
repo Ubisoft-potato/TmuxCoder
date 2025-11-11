@@ -27,6 +27,7 @@ type Session struct {
 
 type Panel struct {
 	ID      string `yaml:"id"`
+	Module  string `yaml:"module"`
 	Type    string `yaml:"type"`
 	Width   string `yaml:"width"`
 	Height  string `yaml:"height"`
