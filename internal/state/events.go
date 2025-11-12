@@ -91,6 +91,13 @@ func (bus *EventBus) broadcastUnsafe(event types.StateEvent, excludePanel string
 	// Add to event history
 	bus.addToHistoryUnsafe(event)
 
+	type pendingRemoval struct {
+		connectionID string
+		reason       string
+	}
+
+	var toRemove []pendingRemoval
+
 	// Send to all subscribers except the source panel
 	for connectionID, eventChan := range bus.subscribers {
 		meta, hasMeta := bus.subscriberMeta[connectionID]
@@ -115,9 +122,19 @@ func (bus *EventBus) broadcastUnsafe(event types.StateEvent, excludePanel string
 			if hasMeta && meta.PanelID != "" {
 				panelLabel = meta.PanelID
 			}
-			log.Printf("Warning: Event channel full for %s (connection %s), dropping event %s",
+			log.Printf("Warning: Event channel full for %s (connection %s), dropping event %s and disconnecting subscriber",
 				panelLabel, connectionID, event.Type)
+
+			reason := fmt.Sprintf("event channel overflow while delivering %s", event.Type)
+			toRemove = append(toRemove, pendingRemoval{
+				connectionID: connectionID,
+				reason:       reason,
+			})
 		}
+	}
+
+	for _, removal := range toRemove {
+		bus.removeSubscriberLocked(removal.connectionID, removal.reason)
 	}
 }
 

@@ -3,6 +3,7 @@ package ipc
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -249,12 +250,7 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 	server.handleClientMessages(clientConn)
 
 	// Cleanup on disconnect
-	server.connectionsMux.Lock()
-	delete(server.connections, clientConn.ID)
-	server.connectionsMux.Unlock()
-
-	server.eventBus.Unsubscribe(clientConn.ID)
-	log.Printf("Panel %s (%s) disconnected", clientConn.PanelID, clientConn.PanelType)
+	server.disconnectClient(clientConn, "client message loop ended")
 }
 
 // handleClientMessages processes incoming messages from a client
@@ -423,7 +419,14 @@ func (server *SocketServer) handlePing(clientConn *ClientConnection, message IPC
 
 // forwardEvents forwards state events to a client
 func (server *SocketServer) forwardEvents(clientConn *ClientConnection, eventChan chan types.StateEvent) {
-	for event := range eventChan {
+	for {
+		event, ok := <-eventChan
+		if !ok {
+			log.Printf("Event channel closed for client %s; disconnecting", clientConn.ID)
+			server.disconnectClient(clientConn, "event channel closed")
+			return
+		}
+
 		message := IPCMessage{
 			Type:      "state_event",
 			Data:      event,
@@ -431,9 +434,50 @@ func (server *SocketServer) forwardEvents(clientConn *ClientConnection, eventCha
 		}
 		if err := clientConn.send(message); err != nil {
 			log.Printf("Failed to forward event to client %s: %v", clientConn.ID, err)
-			return // Stop forwarding if sending fails
+			server.disconnectClient(clientConn, fmt.Sprintf("event forwarding failed: %v", err))
+			return
 		}
 	}
+}
+
+// disconnectClient removes a client connection, unsubscribes it from the event bus,
+// and closes the underlying socket. It returns true if the connection was active.
+func (server *SocketServer) disconnectClient(clientConn *ClientConnection, reason string) bool {
+	if clientConn == nil {
+		return false
+	}
+
+	removed := false
+
+	server.connectionsMux.Lock()
+	if existing, exists := server.connections[clientConn.ID]; exists && existing == clientConn {
+		delete(server.connections, clientConn.ID)
+		removed = true
+	}
+	server.connectionsMux.Unlock()
+
+	server.eventBus.Unsubscribe(clientConn.ID)
+
+	clientConn.sendMutex.Lock()
+	conn := clientConn.Conn
+	clientConn.Conn = nil
+	clientConn.sendMutex.Unlock()
+
+	if conn != nil {
+		if err := conn.Close(); err != nil && !errors.Is(err, net.ErrClosed) {
+			log.Printf("Failed to close connection %s cleanly: %v", clientConn.ID, err)
+		}
+	}
+
+	if removed {
+		if reason != "" {
+			log.Printf("Panel %s (%s) disconnected (reason: %s)", clientConn.PanelID, clientConn.PanelType, reason)
+		} else {
+			log.Printf("Panel %s (%s) disconnected", clientConn.PanelID, clientConn.PanelType)
+		}
+	}
+
+	return removed
 }
 
 // sendError sends a generic error message to a client.
