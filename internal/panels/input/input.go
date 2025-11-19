@@ -293,6 +293,7 @@ type InputPanel struct {
 	// Current model information
 	currentProvider string // Current selected provider
 	currentModel    string // Current selected model
+	promptTimeout   time.Duration
 }
 
 var completionSuggestions = []string{
@@ -306,6 +307,11 @@ var completionSuggestions = []string{
 	"compact",
 }
 
+const (
+	promptTimeoutEnvVar  = "OPENCODE_PROMPT_TIMEOUT"
+	defaultPromptTimeout = 2 * time.Minute
+)
+
 // NewInputPanel creates a new input panel
 func NewInputPanel(parent context.Context, httpClient *opencode.Client, socketPath string, comfortableThemes []string, currentTheme string) *InputPanel {
 	ctx, cancel := context.WithCancel(parent)
@@ -317,6 +323,18 @@ func NewInputPanel(parent context.Context, httpClient *opencode.Client, socketPa
 			break
 		}
 	}
+
+	promptTimeout := defaultPromptTimeout
+	if envTimeout := strings.TrimSpace(os.Getenv(promptTimeoutEnvVar)); envTimeout != "" {
+		if parsed, err := time.ParseDuration(envTimeout); err != nil {
+			log.Printf("[INPUT] Invalid %s value %q: %v", promptTimeoutEnvVar, envTimeout, err)
+		} else if parsed <= 0 {
+			log.Printf("[INPUT] Ignoring non-positive %s value %q", promptTimeoutEnvVar, envTimeout)
+		} else {
+			promptTimeout = parsed
+		}
+	}
+	log.Printf("[INPUT] Using prompt timeout: %s", promptTimeout)
 
 	panel := &InputPanel{
 		client:            httpClient,
@@ -337,6 +355,7 @@ func NewInputPanel(parent context.Context, httpClient *opencode.Client, socketPa
 		helpLines:         make([]string, 0),
 		comfortableThemes: comfortableThemes,
 		currentThemeIndex: currentIndex,
+		promptTimeout:     promptTimeout,
 	}
 
 	// Register event handlers
@@ -1432,8 +1451,23 @@ func (p *InputPanel) makeSendCommand(message, sessionID string) tea.Cmd {
 	return func() tea.Msg {
 		p.addToHistory(message)
 
-		go func(session, userMsg string) {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		timeout := p.promptTimeout
+
+		go func(session, userMsg string, wait time.Duration) {
+			parentCtx := p.ctx
+			if parentCtx == nil {
+				parentCtx = context.Background()
+			}
+
+			var (
+				ctx    context.Context
+				cancel context.CancelFunc
+			)
+			if wait > 0 {
+				ctx, cancel = context.WithTimeout(parentCtx, wait)
+			} else {
+				ctx, cancel = context.WithCancel(parentCtx)
+			}
 			defer cancel()
 
 			response, err := p.client.Session.Prompt(ctx, session, opencode.SessionPromptParams{
@@ -1446,7 +1480,11 @@ func (p *InputPanel) makeSendCommand(message, sessionID string) tea.Cmd {
 			})
 
 			if err != nil {
-				log.Printf("[INPUT] Failed to send message to OpenCode API: %v", err)
+				if errors.Is(err, context.DeadlineExceeded) && wait > 0 {
+					log.Printf("[INPUT] Prompt request timed out after %s", wait)
+				} else {
+					log.Printf("[INPUT] Failed to send message to OpenCode API: %v", err)
+				}
 				return
 			}
 
@@ -1459,7 +1497,7 @@ func (p *InputPanel) makeSendCommand(message, sessionID string) tea.Cmd {
 			if response.Info.Error.Name != "" {
 				log.Printf("[INPUT] Assistant message error: %s - %v", response.Info.Error.Name, response.Info.Error.Data)
 			}
-		}(sessionID, message)
+		}(sessionID, message, timeout)
 
 		return MessageSentMsg{}
 	}

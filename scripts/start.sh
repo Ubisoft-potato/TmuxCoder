@@ -277,7 +277,7 @@ refresh_state_from_live() {
     return 0
   fi
   load_live_sessions
-  CURRENT_SESSIONS=("${LIVE_SESSIONS[@]}")
+  CURRENT_SESSIONS=("${LIVE_SESSIONS[@]+"${LIVE_SESSIONS[@]}"}")
   sort_and_dedupe_current_sessions
   write_current_sessions_to_file "$SESSION_STATE_FILE" "$SESSION_STATE_TMP"
 }
@@ -356,6 +356,46 @@ prompt_new_session_name() {
   done
 }
 
+prompt_existing_session_action() {
+  local session="$1"
+  local display
+  display="$(format_display_name "$session")"
+
+  echo ""
+  echo "Session ${display} [${session}] selected. Choose an action:"
+  echo "  r) Reuse session (restart orchestrator, keep panes) [default]"
+  echo "  a) Attach only (leave existing processes running)"
+  echo "  q) Cancel"
+
+  while :; do
+    printf 'Action [r/a/q]: '
+    local action
+    if ! IFS= read -r action; then
+      return 1
+    fi
+    action="$(trim_whitespace "$action")"
+
+    case "$action" in
+      ""|"r"|"reuse"|"R"|"REUSE")
+        SESSION_ACTION="reuse"
+        echo ""
+        return 0
+        ;;
+      "a"|"attach"|"A"|"ATTACH")
+        SESSION_ACTION="attach"
+        echo ""
+        return 0
+        ;;
+      "q"|"quit"|"Q"|"QUIT"|"!")
+        return 1
+        ;;
+      *)
+        echo "Invalid selection."
+        ;;
+    esac
+  done
+}
+
 prompt_session_choice() {
   local count=${#CURRENT_SESSIONS[@]}
   if [[ $count -eq 0 ]]; then
@@ -394,8 +434,10 @@ prompt_session_choice() {
       local number="$choice"
       if (( number >= 1 && number <= count )); then
         SELECTED_SESSION="${CURRENT_SESSIONS[$((number - 1))]}"
-        SESSION_ACTION="attach"
-        return 0
+        if prompt_existing_session_action "$SELECTED_SESSION"; then
+          return 0
+        fi
+        continue
       fi
       if (( number == count + 1 )); then
         if prompt_new_session_name; then
@@ -573,6 +615,8 @@ fi
 
 if [[ "$SESSION_ACTION" == "create" ]]; then
   PERFORM_CLEANUP=1
+elif [[ "$SESSION_ACTION" == "reuse" ]]; then
+  PERFORM_CLEANUP=1
 fi
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
@@ -625,19 +669,31 @@ fi
 
 OPENCODE_HOME="${OPENCODE_HOME:-${HOME}/.opencode}"
 export OPENCODE_SERVER="${SERVER_URL}"
-export OPENCODE_SOCKET="${OPENCODE_SOCKET:-${OPENCODE_HOME}/ipc.sock}"
-export OPENCODE_STATE="${OPENCODE_STATE:-${OPENCODE_HOME}/state.json}"
+# Note: OPENCODE_SOCKET and OPENCODE_STATE are now auto-managed per-session
+# Only export them if explicitly set by user
+if [[ -n "${OPENCODE_SOCKET:-}" ]]; then
+  export OPENCODE_SOCKET
+fi
+if [[ -n "${OPENCODE_STATE:-}" ]]; then
+  export OPENCODE_STATE
+fi
 export OPENCODE_TMUX_CONFIG="${OPENCODE_TMUX_CONFIG:-${OPENCODE_HOME}/tmux.yaml}"
 
 mkdir -p "${OPENCODE_HOME}"
-mkdir -p "$(dirname "${OPENCODE_SOCKET}")"
-mkdir -p "$(dirname "${OPENCODE_STATE}")"
 mkdir -p "$(dirname "${OPENCODE_TMUX_CONFIG}")"
 
 echo "==> Starting opencode-tmux with environment variables"
 echo "  OPENCODE_SERVER=${OPENCODE_SERVER}"
-echo "  OPENCODE_SOCKET=${OPENCODE_SOCKET}"
-echo "  OPENCODE_STATE=${OPENCODE_STATE}"
+if [[ -n "${OPENCODE_SOCKET:-}" ]]; then
+  echo "  OPENCODE_SOCKET=${OPENCODE_SOCKET} (user override)"
+else
+  echo "  OPENCODE_SOCKET=<auto per-session>"
+fi
+if [[ -n "${OPENCODE_STATE:-}" ]]; then
+  echo "  OPENCODE_STATE=${OPENCODE_STATE} (user override)"
+else
+  echo "  OPENCODE_STATE=<auto per-session>"
+fi
 echo "  OPENCODE_TMUX_CONFIG=${OPENCODE_TMUX_CONFIG}"
 
 BIN_PATH="${REPO_ROOT}/cmd/opencode-tmux/dist/opencode-tmux"
@@ -654,8 +710,18 @@ for arg in "${FORWARD_ARGS[@]+"${FORWARD_ARGS[@]}"}"; do
   fi
 done
 
-if [[ -n "$REQUESTED_PANELS" && $SESSION_FLAG_PRESENT -eq 0 && $ATTACH_ONLY -eq 0 && $RELOAD_LAYOUT -eq 0 && "$SESSION_ACTION" != "create" ]]; then
-  FORWARD_ARGS+=("--reuse-session")
+# Convert "reuse" action to "reload-layout" command
+if [[ "$SESSION_ACTION" == "reuse" && -n "$SELECTED_SESSION" ]]; then
+  RELOAD_LAYOUT=1
+  RELOAD_TARGET_SESSION="$SELECTED_SESSION"
+  SESSION_ACTION=""
+fi
+
+if [[ "$SESSION_ACTION" == "" && $SESSION_FLAG_PRESENT -eq 0 && $ATTACH_ONLY -eq 0 && $RELOAD_LAYOUT -eq 0 ]]; then
+  if [[ -n "$REQUESTED_PANELS" ]]; then
+    FORWARD_ARGS+=("--reuse-session")
+    SESSION_FLAG_PRESENT=1
+  fi
 fi
 
 if [[ "$SESSION_ACTION" == "create" && -n "$SELECTED_SESSION" ]]; then
@@ -671,6 +737,9 @@ fi
 CMD=("${BIN_PATH}")
 if [[ ${#FORWARD_ARGS[@]} -gt 0 ]]; then
   CMD+=("${FORWARD_ARGS[@]}")
+fi
+if [[ $RELOAD_LAYOUT -eq 1 ]]; then
+  CMD+=("--reload-layout")
 fi
 if [[ "$SESSION_ACTION" == "create" && -n "$SELECTED_SESSION" ]]; then
   CMD+=("${SELECTED_SESSION}")

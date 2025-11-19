@@ -24,7 +24,9 @@ import (
 	tmuxconfig "github.com/opencode/tmux_coder/internal/config"
 	"github.com/opencode/tmux_coder/internal/ipc"
 	panelregistry "github.com/opencode/tmux_coder/internal/panel"
+	"github.com/opencode/tmux_coder/internal/paths"
 	"github.com/opencode/tmux_coder/internal/persistence"
+	"github.com/opencode/tmux_coder/internal/session"
 	"github.com/opencode/tmux_coder/internal/state"
 	"github.com/opencode/tmux_coder/internal/theme"
 	"github.com/opencode/tmux_coder/internal/types"
@@ -131,6 +133,8 @@ func (orch *TmuxOrchestrator) Start() error {
 
 	sessionExists := orch.sessionExists()
 
+	needsConfiguration := false
+
 	if sessionExists {
 		if orch.forceNewSession {
 			if err := orch.killTmuxSession(); err != nil {
@@ -141,6 +145,7 @@ func (orch *TmuxOrchestrator) Start() error {
 			if err := orch.resetTmuxWindow(); err != nil {
 				return fmt.Errorf("failed to prepare existing session: %w", err)
 			}
+			needsConfiguration = true // Reuse requires reconfiguration
 		} else {
 			if err := orch.killTmuxSession(); err != nil {
 				return fmt.Errorf("failed to stop existing session: %w", err)
@@ -154,12 +159,13 @@ func (orch *TmuxOrchestrator) Start() error {
 		if err := orch.createTmuxSession(); err != nil {
 			return fmt.Errorf("failed to create tmux session: %w", err)
 		}
+		needsConfiguration = true // New session requires configuration
 	}
 
 	if orch.serverOnly {
 		log.Printf("Server-only mode: skipping panel configuration and applications")
-	} else {
-		// Configure panels
+	} else if needsConfiguration {
+		// Configure panels (for new sessions or reused sessions)
 		if err := orch.configurePanels(); err != nil {
 			return fmt.Errorf("failed to configure panels: %w", err)
 		}
@@ -1937,16 +1943,42 @@ func main() {
 		log.Fatalf("Failed to load tmux session config: %v", err)
 	}
 
-	socketPath := os.Getenv("OPENCODE_SOCKET")
-	if socketPath == "" {
-		socketPath = filepath.Join(homeDir, ".opencode", "ipc.sock")
+	// === Per-Session Architecture: Use session name from command line ===
+	// The sessionName variable (from flag.Arg(0)) is the target tmux session name
+	// We'll use this to create per-session isolated paths
+
+	// Environment variables for explicit path override (optional)
+	envSocketPath := os.Getenv("OPENCODE_SOCKET")
+	envStatePath := os.Getenv("OPENCODE_STATE")
+
+	var socketPath, statePath string
+	var lock *session.SessionLock
+
+	// Create path manager based on the target tmux session name
+	pathMgr := paths.NewPathManager(sessionName)
+	log.Printf("Managing tmux session: %s", sessionName)
+
+	// Ensure all necessary directories exist
+	if err := pathMgr.EnsureDirectories(); err != nil {
+		log.Fatalf("Failed to create directories: %v", err)
 	}
 
-	statePath := os.Getenv("OPENCODE_STATE")
-	if statePath == "" {
-		statePath = filepath.Join(homeDir, ".opencode", "state.json")
+	// Cleanup stale files (files older than 7 days from zombie processes)
+	if err := pathMgr.CleanupStaleFiles(7 * 24 * time.Hour); err != nil {
+		log.Printf("Warning: failed to cleanup stale files: %v", err)
 	}
 
+	// Determine socket path early (needed for reload-layout command)
+	if envSocketPath != "" {
+		socketPath = envSocketPath
+		log.Printf("Socket path (from env): %s", socketPath)
+	} else {
+		socketPath = pathMgr.SocketPath()
+		log.Printf("Socket path (per-session): %s", socketPath)
+	}
+
+	// Handle reload-layout command BEFORE acquiring lock
+	// (orchestrator is already running, so we send IPC message and exit)
 	if reloadLayoutFlag {
 		if !sessionOverride {
 			name := strings.TrimSpace(sessionCfg.Session.Name)
@@ -1960,6 +1992,26 @@ func main() {
 		}
 		fmt.Println("Reload layout command sent successfully.")
 		return
+	}
+
+	// Prevent duplicate startup: acquire session lock
+	lock, err = session.AcquireLock(pathMgr.PIDPath())
+	if err != nil {
+		if err == session.ErrAlreadyRunning {
+			log.Fatalf("Orchestrator already running for tmux session '%s'\nPID file: %s",
+				sessionName, pathMgr.PIDPath())
+		}
+		log.Fatalf("Failed to acquire lock: %v", err)
+	}
+	defer lock.Release()
+	log.Printf("Lock acquired: %s", pathMgr.PIDPath())
+
+	if envStatePath != "" {
+		statePath = envStatePath
+		log.Printf("State path (from env): %s", statePath)
+	} else {
+		statePath = pathMgr.StatePath()
+		log.Printf("State path (per-session): %s", statePath)
 	}
 
 	layoutCfg, err := tmuxconfig.LoadLayout(configPath)
