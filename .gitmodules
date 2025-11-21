@@ -1,0 +1,3 @@
+[submodule "packages/opencode"]
+	path = packages/opencode
+	url = git@github.com:Ubisoft-potato/opencode.git
