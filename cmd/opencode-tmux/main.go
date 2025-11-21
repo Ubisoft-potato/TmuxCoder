@@ -1863,6 +1863,51 @@ func (orch *TmuxOrchestrator) printStatus() {
 	}
 }
 
+func firstPositionalArg(args []string) (string, bool) {
+	for idx, arg := range args {
+		if arg == "--" {
+			if idx+1 < len(args) {
+				next := args[idx+1]
+				if next != "" {
+					return next, true
+				}
+			}
+			return "", false
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		if arg != "" {
+			return arg, true
+		}
+	}
+	return "", false
+}
+
+func sanitizeLogComponent(name string) string {
+	if name == "" {
+		return "opencode"
+	}
+	var builder strings.Builder
+	builder.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z',
+			r >= 'A' && r <= 'Z',
+			r >= '0' && r <= '9':
+			builder.WriteRune(r)
+		case r == '-', r == '_', r == '.':
+			builder.WriteRune(r)
+		default:
+			builder.WriteByte('_')
+		}
+	}
+	if builder.Len() == 0 {
+		return "opencode"
+	}
+	return builder.String()
+}
+
 func main() {
 	// Configure logging to file
 	logFileHomeDir, err := os.UserHomeDir()
@@ -1873,7 +1918,18 @@ func main() {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		log.Fatalf("Failed to create log directory: %v", err)
 	}
-	logPath := filepath.Join(logDir, "tmux.log")
+
+	// Parse session name early for logging
+	sessionName := "opencode"
+	if positional, ok := firstPositionalArg(os.Args[1:]); ok {
+		sessionName = positional
+	}
+	// Note: We can't fully load config yet as we haven't parsed flags,
+	// but we need to setup logging early. We'll use the CLI arg or default
+	// for the log name. If it changes later (e.g. from config), the log
+	// name will remain as started, which is acceptable.
+
+	logPath := filepath.Join(logDir, fmt.Sprintf("tmux-%s.log", sanitizeLogComponent(sessionName)))
 	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
 	if err != nil {
 		log.Fatalf("Failed to open log file: %v", err)
@@ -1915,10 +1971,11 @@ func main() {
 		log.Fatal("cannot combine --reload-layout with --attach-only")
 	}
 
-	sessionName := "opencode"
 	sessionOverride := false
 	if flag.NArg() > 0 {
 		sessionName = flag.Arg(0)
+		sessionOverride = true
+	} else if sessionName != "opencode" {
 		sessionOverride = true
 	}
 
