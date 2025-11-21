@@ -16,6 +16,7 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea/v2"
+	"github.com/mattn/go-runewidth"
 	"github.com/opencode/tmux_coder/internal/ipc"
 	"github.com/opencode/tmux_coder/internal/panel"
 	"github.com/opencode/tmux_coder/internal/state"
@@ -2854,101 +2855,144 @@ Keyboard Shortcuts:
 		Render(strings.TrimSpace(helpContent))
 }
 
+// padContent ensures the content fits within the desired width using rune display widths.
+func padContent(content string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	trimmed := content
+	if runewidth.StringWidth(content) > width {
+		trimmed = truncateWithEllipsis(content, width)
+	}
+
+	padding := width - runewidth.StringWidth(trimmed)
+	if padding > 0 {
+		trimmed += strings.Repeat(" ", padding)
+	}
+
+	return trimmed
+}
+
+// truncateWithEllipsis truncates a string to the provided width and adds an ellipsis when needed.
+func truncateWithEllipsis(content string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	if runewidth.StringWidth(content) <= width {
+		return content
+	}
+
+	if width <= 3 {
+		return runewidth.Truncate(content, width, "")
+	}
+
+	return runewidth.Truncate(content, width-3, "") + "..."
+}
+
+// centerContent centers text within the specified width.
+func centerContent(content string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+
+	currentWidth := runewidth.StringWidth(content)
+	if currentWidth > width {
+		content = truncateWithEllipsis(content, width)
+		currentWidth = runewidth.StringWidth(content)
+	}
+
+	if currentWidth >= width {
+		return padContent(content, width)
+	}
+
+	leftPadding := (width - currentWidth) / 2
+	rightPadding := width - currentWidth - leftPadding
+
+	return strings.Repeat(" ", leftPadding) + content + strings.Repeat(" ", rightPadding)
+}
+
 func (p *InputPanel) renderModelDialog() string {
 	var result strings.Builder
 
-	// Calculate dialog dimensions
 	dialogWidth := min(p.width-4, 60)   // Leave margin and max width
 	dialogHeight := min(p.height-4, 20) // Leave margin and max height
+	if dialogWidth < 4 {
+		dialogWidth = 4
+	}
+	if dialogHeight < 4 {
+		dialogHeight = 4
+	}
 
-	// Top border
-	result.WriteString("┌" + strings.Repeat("─", dialogWidth-2) + "┐\n")
+	contentWidth := dialogWidth - 2
 
-	// Title line with close hint
+	writeLine := func(content string, lines *int) {
+		result.WriteString("│" + padContent(content, contentWidth) + "│\n")
+		*lines++
+	}
+
+	writeSeparator := func(lines *int) {
+		result.WriteString("├" + strings.Repeat("─", contentWidth) + "┤\n")
+		*lines++
+	}
+
+	result.WriteString("┌" + strings.Repeat("─", contentWidth) + "┐\n")
+	linesWritten := 0
+
 	title := " Select Model "
 	closeHint := " esc "
-	padding := dialogWidth - len(title) - len(closeHint) - 2
-	if padding < 0 {
-		padding = 0
+	paddingWidth := contentWidth - runewidth.StringWidth(title) - runewidth.StringWidth(closeHint)
+	if paddingWidth < 0 {
+		paddingWidth = 0
 	}
-	result.WriteString("│" + title + strings.Repeat(" ", padding) + closeHint + "│\n")
+	titleLine := title + strings.Repeat(" ", paddingWidth) + closeHint
+	writeLine(titleLine, &linesWritten)
 
-	// Separator
-	result.WriteString("├" + strings.Repeat("─", dialogWidth-2) + "┤\n")
+	writeSeparator(&linesWritten)
 
-	// Search box
 	searchPrompt := " 🔍 Search models..."
 	if p.modelSearchQuery != "" {
 		searchPrompt = " 🔍 " + p.modelSearchQuery
 	}
-	searchPadding := dialogWidth - len(searchPrompt) - 2
-	if searchPadding < 0 {
-		searchPadding = 0
-	}
-	result.WriteString("│" + searchPrompt + strings.Repeat(" ", searchPadding) + "│\n")
+	writeLine(searchPrompt, &linesWritten)
+	writeLine("", &linesWritten)
 
-	// Empty line
-	result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
-
-	// Recent section (if no search query)
 	if p.modelSearchQuery == "" {
-		recentTitle := " Recent"
-		recentPadding := dialogWidth - len(recentTitle) - 2
-		if recentPadding < 0 {
-			recentPadding = 0
-		}
-		result.WriteString("│" + recentTitle + strings.Repeat(" ", recentPadding) + "│\n")
-
-		// Recent model
-		recentModel := "   Grok Code Fast 1  OpenCode Zen"
-		if len(recentModel) > dialogWidth-2 {
-			recentModel = recentModel[:dialogWidth-5] + "..."
-		}
-		recentPadding = dialogWidth - len(recentModel) - 2
-		if recentPadding < 0 {
-			recentPadding = 0
-		}
-		result.WriteString("│" + recentModel + strings.Repeat(" ", recentPadding) + "│\n")
-
-		// Empty line
-		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
-
-		// Provider section
-		providerTitle := " OpenCode Zen"
-		providerPadding := dialogWidth - len(providerTitle) - 2
-		if providerPadding < 0 {
-			providerPadding = 0
-		}
-		result.WriteString("│" + providerTitle + strings.Repeat(" ", providerPadding) + "│\n")
+		writeLine(" Recent", &linesWritten)
+		writeLine("   Grok Code Fast 1  OpenCode Zen", &linesWritten)
+		writeLine("", &linesWritten)
+		writeLine(" OpenCode Zen", &linesWritten)
 	}
 
-	// Calculate available space for models
 	maxModels := dialogHeight - 8 // Reserve space for header, search, etc.
 	if p.modelSearchQuery != "" {
 		maxModels = dialogHeight - 5 // Less space needed when no recent section
 	}
+	if maxModels < 0 {
+		maxModels = 0
+	}
 
-	// Calculate scroll indicators
 	totalModels := len(p.availableModels)
 	showScrollUp := p.modelScrollOffset > 0
 	showScrollDown := p.modelScrollOffset+maxModels < totalModels
 
-	// Add scroll up indicator if needed
 	if showScrollUp {
-		scrollUpLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↑" + strings.Repeat(" ", (dialogWidth-3)/2)
-		if len(scrollUpLine) > dialogWidth-2 {
-			scrollUpLine = scrollUpLine[:dialogWidth-2]
+		writeLine(centerContent("↑", contentWidth), &linesWritten)
+		maxModels--
+		if maxModels < 0 {
+			maxModels = 0
 		}
-		scrollUpPadding := dialogWidth - len(scrollUpLine) - 2
-		if scrollUpPadding < 0 {
-			scrollUpPadding = 0
-		}
-		result.WriteString("│" + scrollUpLine + strings.Repeat(" ", scrollUpPadding) + "│\n")
-		maxModels-- // Reduce available space for models
 	}
 
-	// Render visible models with scroll offset
 	visibleStart := p.modelScrollOffset
+	if visibleStart < 0 {
+		visibleStart = 0
+	}
+	if visibleStart > totalModels {
+		visibleStart = totalModels
+	}
+
 	visibleEnd := min(visibleStart+maxModels, totalModels)
 
 	for i := visibleStart; i < visibleEnd; i++ {
@@ -2956,89 +3000,81 @@ func (p *InputPanel) renderModelDialog() string {
 
 		prefix := "   "
 		if i == p.modelSelectedIdx {
-			prefix = " ▶ " // Selection indicator with proper spacing
+			prefix = " ▶ "
 		}
 
-		modelLine := prefix + model.Name + "  " + model.Provider
-		if len(modelLine) > dialogWidth-2 {
-			modelLine = modelLine[:dialogWidth-5] + "..."
+		prefixWidth := runewidth.StringWidth(prefix)
+		remainingWidth := contentWidth - prefixWidth
+		if remainingWidth < 0 {
+			remainingWidth = 0
 		}
 
-		modelPadding := dialogWidth - len(modelLine) - 2
-		if modelPadding < 0 {
-			modelPadding = 0
-		}
-		result.WriteString("│" + modelLine + strings.Repeat(" ", modelPadding) + "│\n")
+		providerPart := "  " + model.Provider
+		providerWidth := runewidth.StringWidth(providerPart)
 
-		// Add underline for selected model on the next line
+		nameWidthLimit := remainingWidth
+		if providerWidth < remainingWidth {
+			nameWidthLimit = remainingWidth - providerWidth
+		}
+		if nameWidthLimit < 0 {
+			nameWidthLimit = 0
+		}
+
+		nameDisplay := model.Name
+		if nameWidthLimit > 0 && runewidth.StringWidth(nameDisplay) > nameWidthLimit {
+			nameDisplay = truncateWithEllipsis(nameDisplay, nameWidthLimit)
+		}
+
+		lineContent := prefix + nameDisplay
+		remaining := contentWidth - runewidth.StringWidth(lineContent)
+		if remaining > 0 && providerWidth > 0 {
+			providerDisplay := providerPart
+			if runewidth.StringWidth(providerDisplay) > remaining {
+				providerDisplay = truncateWithEllipsis(providerDisplay, remaining)
+			}
+			lineContent += providerDisplay
+		}
+
+		writeLine(lineContent, &linesWritten)
+
 		if i == p.modelSelectedIdx {
-			// Create underline for the model name part only
-			nameLength := len(model.Name)
-			prefixLength := 4                            // Length of " ▶ "
-			if nameLength > dialogWidth-prefixLength-6 { // Account for prefix, provider and padding
-				nameLength = dialogWidth - prefixLength - 6
+			underlineWidth := runewidth.StringWidth(nameDisplay)
+			underline := ""
+			if underlineWidth > 0 {
+				underline = strings.Repeat(" ", prefixWidth) + strings.Repeat("─", underlineWidth)
+			} else {
+				underline = strings.Repeat(" ", prefixWidth)
 			}
-			underline := strings.Repeat("─", nameLength)
-			underlineLine := strings.Repeat(" ", prefixLength) + underline
-			underlinePadding := dialogWidth - len(underlineLine) - 2
-			if underlinePadding < 0 {
-				underlinePadding = 0
-			}
-			result.WriteString("│" + underlineLine + strings.Repeat(" ", underlinePadding) + "│\n")
+			writeLine(underline, &linesWritten)
 		}
 	}
 
-	// Add scroll down indicator if needed
 	if showScrollDown {
-		scrollDownLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↓" + strings.Repeat(" ", (dialogWidth-3)/2)
-		if len(scrollDownLine) > dialogWidth-2 {
-			scrollDownLine = scrollDownLine[:dialogWidth-2]
-		}
-		scrollDownPadding := dialogWidth - len(scrollDownLine) - 2
-		if scrollDownPadding < 0 {
-			scrollDownPadding = 0
-		}
-		result.WriteString("│" + scrollDownLine + strings.Repeat(" ", scrollDownPadding) + "│\n")
-		maxModels-- // Account for scroll indicator space
+		writeLine(centerContent("↓", contentWidth), &linesWritten)
 	}
 
-	// Fill remaining space if needed
-	currentLines := 5 // header lines
-	if p.modelSearchQuery == "" {
-		currentLines += 4 // recent section lines
-	}
-	if showScrollUp {
-		currentLines++
-	}
-	currentLines += (visibleEnd - visibleStart) // visible models
-	if showScrollDown {
-		currentLines++
+	for linesWritten < dialogHeight-1 {
+		writeLine("", &linesWritten)
 	}
 
-	for currentLines < dialogHeight-1 {
-		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
-		currentLines++
+	bottomContent := strings.Repeat("─", contentWidth)
+	displayCapacity := visibleEnd - visibleStart
+	if displayCapacity <= 0 {
+		displayCapacity = 1
 	}
 
-	// Bottom border
-	result.WriteString("└" + strings.Repeat("─", dialogWidth-2) + "┘")
-
-	// Add scroll position indicator in bottom right corner if there are many models
-	if totalModels > maxModels {
+	if totalModels > displayCapacity {
 		scrollInfo := fmt.Sprintf(" %d/%d ", p.modelSelectedIdx+1, totalModels)
-		bottomLine := result.String()
-		lines := strings.Split(bottomLine, "\n")
-		if len(lines) > 0 {
-			lastLine := lines[len(lines)-1]
-			if len(lastLine) >= len(scrollInfo)+1 {
-				// Replace part of bottom border with scroll info
-				newLastLine := lastLine[:len(lastLine)-len(scrollInfo)-1] + scrollInfo + "┘"
-				lines[len(lines)-1] = newLastLine
-				result.Reset()
-				result.WriteString(strings.Join(lines, "\n"))
-			}
+		scrollInfo = truncateWithEllipsis(scrollInfo, contentWidth)
+		scrollWidth := runewidth.StringWidth(scrollInfo)
+		if scrollWidth < contentWidth {
+			bottomContent = strings.Repeat("─", contentWidth-scrollWidth) + scrollInfo
+		} else {
+			bottomContent = scrollInfo
 		}
 	}
+
+	result.WriteString("└" + padContent(bottomContent, contentWidth) + "┘")
 
 	return result.String()
 }
@@ -3095,74 +3131,77 @@ func (p *InputPanel) renderAgentDialog() string {
 
 	log.Printf("[AGENT_DIALOG] Rendering agent dialog - availableAgents count: %d, selectedIdx: %d, scrollOffset: %d, mode: %s", len(p.availableAgents), p.agentSelectedIdx, p.agentScrollOffset, p.mode)
 
-	// Calculate dialog dimensions
 	dialogWidth := min(p.width-4, 60)   // Leave margin and max width
 	dialogHeight := min(p.height-4, 20) // Leave margin and max height
+	if dialogWidth < 4 {
+		dialogWidth = 4
+	}
+	if dialogHeight < 4 {
+		dialogHeight = 4
+	}
 
-	// Top border
-	result.WriteString("┌" + strings.Repeat("─", dialogWidth-2) + "┐\n")
+	contentWidth := dialogWidth - 2
 
-	// Title line with close hint
+	writeLine := func(content string, lines *int) {
+		result.WriteString("│" + padContent(content, contentWidth) + "│\n")
+		*lines++
+	}
+
+	writeSeparator := func(lines *int) {
+		result.WriteString("├" + strings.Repeat("─", contentWidth) + "┤\n")
+		*lines++
+	}
+
+	result.WriteString("┌" + strings.Repeat("─", contentWidth) + "┐\n")
+	linesWritten := 0
+
 	title := " Select Agent "
 	closeHint := " esc "
-	padding := dialogWidth - len(title) - len(closeHint) - 2
-	if padding < 0 {
-		padding = 0
+	paddingWidth := contentWidth - runewidth.StringWidth(title) - runewidth.StringWidth(closeHint)
+	if paddingWidth < 0 {
+		paddingWidth = 0
 	}
-	result.WriteString("│" + title + strings.Repeat(" ", padding) + closeHint + "│\n")
+	titleLine := title + strings.Repeat(" ", paddingWidth) + closeHint
+	writeLine(titleLine, &linesWritten)
 
-	// Separator
-	result.WriteString("├" + strings.Repeat("─", dialogWidth-2) + "┤\n")
+	writeSeparator(&linesWritten)
 
-	// Search box
 	searchPrompt := " 🔍 Search agents..."
 	if p.agentSearchQuery != "" {
 		searchPrompt = " 🔍 " + p.agentSearchQuery
 	}
-	searchPadding := dialogWidth - len(searchPrompt) - 2
-	if searchPadding < 0 {
-		searchPadding = 0
-	}
-	result.WriteString("│" + searchPrompt + strings.Repeat(" ", searchPadding) + "│\n")
+	writeLine(searchPrompt, &linesWritten)
+	writeLine("", &linesWritten)
+	writeLine(" Available Agents", &linesWritten)
 
-	// Empty line
-	result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
-
-	// Available agents section
-	agentsTitle := " Available Agents"
-	agentsPadding := dialogWidth - len(agentsTitle) - 2
-	if agentsPadding < 0 {
-		agentsPadding = 0
-	}
-	result.WriteString("│" + agentsTitle + strings.Repeat(" ", agentsPadding) + "│\n")
-
-	// Calculate available space for agents
 	maxAgents := dialogHeight - 7 // Reserve space for header, search, etc.
 	if p.agentSearchQuery != "" {
 		maxAgents = dialogHeight - 6 // Less space needed when no recent section
 	}
+	if maxAgents < 0 {
+		maxAgents = 0
+	}
 
-	// Calculate scroll indicators
 	totalAgents := len(p.availableAgents)
 	showScrollUp := p.agentScrollOffset > 0
 	showScrollDown := p.agentScrollOffset+maxAgents < totalAgents
 
-	// Add scroll up indicator if needed
 	if showScrollUp {
-		scrollUpLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↑" + strings.Repeat(" ", (dialogWidth-3)/2)
-		if len(scrollUpLine) > dialogWidth-2 {
-			scrollUpLine = scrollUpLine[:dialogWidth-2]
+		writeLine(centerContent("↑", contentWidth), &linesWritten)
+		maxAgents--
+		if maxAgents < 0 {
+			maxAgents = 0
 		}
-		scrollUpPadding := dialogWidth - len(scrollUpLine) - 2
-		if scrollUpPadding < 0 {
-			scrollUpPadding = 0
-		}
-		result.WriteString("│" + scrollUpLine + strings.Repeat(" ", scrollUpPadding) + "│\n")
-		maxAgents-- // Reduce available space for agents
 	}
 
-	// Render visible agents with scroll offset
 	visibleStart := p.agentScrollOffset
+	if visibleStart < 0 {
+		visibleStart = 0
+	}
+	if visibleStart > totalAgents {
+		visibleStart = totalAgents
+	}
+
 	visibleEnd := min(visibleStart+maxAgents, totalAgents)
 
 	for i := visibleStart; i < visibleEnd; i++ {
@@ -3170,86 +3209,81 @@ func (p *InputPanel) renderAgentDialog() string {
 
 		prefix := "   "
 		if i == p.agentSelectedIdx {
-			prefix = " ▶ " // Selection indicator with proper spacing
+			prefix = " ▶ "
 		}
 
-		agentLine := prefix + agent.Name + "  " + agent.Description
-		if len(agentLine) > dialogWidth-2 {
-			agentLine = agentLine[:dialogWidth-5] + "..."
+		prefixWidth := runewidth.StringWidth(prefix)
+		remainingWidth := contentWidth - prefixWidth
+		if remainingWidth < 0 {
+			remainingWidth = 0
 		}
 
-		agentPadding := dialogWidth - len(agentLine) - 2
-		if agentPadding < 0 {
-			agentPadding = 0
-		}
-		result.WriteString("│" + agentLine + strings.Repeat(" ", agentPadding) + "│\n")
+		descriptionPart := "  " + agent.Description
+		descriptionWidth := runewidth.StringWidth(descriptionPart)
 
-		// Add underline for selected agent on the next line
+		nameWidthLimit := remainingWidth
+		if descriptionWidth < remainingWidth {
+			nameWidthLimit = remainingWidth - descriptionWidth
+		}
+		if nameWidthLimit < 0 {
+			nameWidthLimit = 0
+		}
+
+		nameDisplay := agent.Name
+		if nameWidthLimit > 0 && runewidth.StringWidth(nameDisplay) > nameWidthLimit {
+			nameDisplay = truncateWithEllipsis(nameDisplay, nameWidthLimit)
+		}
+
+		lineContent := prefix + nameDisplay
+		remaining := contentWidth - runewidth.StringWidth(lineContent)
+		if remaining > 0 && descriptionWidth > 0 {
+			descriptionDisplay := descriptionPart
+			if runewidth.StringWidth(descriptionDisplay) > remaining {
+				descriptionDisplay = truncateWithEllipsis(descriptionDisplay, remaining)
+			}
+			lineContent += descriptionDisplay
+		}
+
+		writeLine(lineContent, &linesWritten)
+
 		if i == p.agentSelectedIdx {
-			// Create underline for the agent name part only
-			nameLength := len(agent.Name)
-			prefixLength := 4                            // Length of " ▶ "
-			if nameLength > dialogWidth-prefixLength-6 { // Account for prefix, description and padding
-				nameLength = dialogWidth - prefixLength - 6
+			underlineWidth := runewidth.StringWidth(nameDisplay)
+			underline := ""
+			if underlineWidth > 0 {
+				underline = strings.Repeat(" ", prefixWidth) + strings.Repeat("─", underlineWidth)
+			} else {
+				underline = strings.Repeat(" ", prefixWidth)
 			}
-			underline := strings.Repeat("─", nameLength)
-			underlineLine := strings.Repeat(" ", prefixLength) + underline
-			underlinePadding := dialogWidth - len(underlineLine) - 2
-			if underlinePadding < 0 {
-				underlinePadding = 0
-			}
-			result.WriteString("│" + underlineLine + strings.Repeat(" ", underlinePadding) + "│\n")
+			writeLine(underline, &linesWritten)
 		}
 	}
 
-	// Add scroll down indicator if needed
 	if showScrollDown {
-		scrollDownLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↓" + strings.Repeat(" ", (dialogWidth-3)/2)
-		if len(scrollDownLine) > dialogWidth-2 {
-			scrollDownLine = scrollDownLine[:dialogWidth-2]
-		}
-		scrollDownPadding := dialogWidth - len(scrollDownLine) - 2
-		if scrollDownPadding < 0 {
-			scrollDownPadding = 0
-		}
-		result.WriteString("│" + scrollDownLine + strings.Repeat(" ", scrollDownPadding) + "│\n")
-		maxAgents-- // Account for scroll indicator space
+		writeLine(centerContent("↓", contentWidth), &linesWritten)
 	}
 
-	// Fill remaining space if needed
-	currentLines := 6 // header lines
-	if showScrollUp {
-		currentLines++
-	}
-	currentLines += (visibleEnd - visibleStart) // visible agents
-	if showScrollDown {
-		currentLines++
+	for linesWritten < dialogHeight-1 {
+		writeLine("", &linesWritten)
 	}
 
-	for currentLines < dialogHeight-1 {
-		result.WriteString("│" + strings.Repeat(" ", dialogWidth-2) + "│\n")
-		currentLines++
+	bottomContent := strings.Repeat("─", contentWidth)
+	displayCapacity := visibleEnd - visibleStart
+	if displayCapacity <= 0 {
+		displayCapacity = 1
 	}
 
-	// Bottom border
-	result.WriteString("└" + strings.Repeat("─", dialogWidth-2) + "┘")
-
-	// Add scroll position indicator in bottom right corner if there are many agents
-	if totalAgents > maxAgents {
+	if totalAgents > displayCapacity {
 		scrollInfo := fmt.Sprintf(" %d/%d ", p.agentSelectedIdx+1, totalAgents)
-		bottomLine := result.String()
-		lines := strings.Split(bottomLine, "\n")
-		if len(lines) > 0 {
-			lastLine := lines[len(lines)-1]
-			if len(lastLine) >= len(scrollInfo)+1 {
-				// Replace part of bottom border with scroll info
-				newLastLine := lastLine[:len(lastLine)-len(scrollInfo)-1] + scrollInfo + "┘"
-				lines[len(lines)-1] = newLastLine
-				result.Reset()
-				result.WriteString(strings.Join(lines, "\n"))
-			}
+		scrollInfo = truncateWithEllipsis(scrollInfo, contentWidth)
+		scrollWidth := runewidth.StringWidth(scrollInfo)
+		if scrollWidth < contentWidth {
+			bottomContent = strings.Repeat("─", contentWidth-scrollWidth) + scrollInfo
+		} else {
+			bottomContent = scrollInfo
 		}
 	}
+
+	result.WriteString("└" + padContent(bottomContent, contentWidth) + "┘")
 
 	return result.String()
 }
