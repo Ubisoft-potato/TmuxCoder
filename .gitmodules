@@ -1,3 +1,4 @@
 [submodule "packages/opencode"]
 	path = packages/opencode
-	url = git@github.com:sst/opencode.git
+	url = https://github.com/sst/opencode.git
+	branch = v1.0.85
