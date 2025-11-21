@@ -25,6 +25,10 @@ EOF
 
 SKIP_BUILD=0
 SERVER_URL="${OPENCODE_SERVER:-http://127.0.0.1:62435}"
+SERVER_URL_SOURCE="default"
+if [[ -n "${OPENCODE_SERVER:-}" ]]; then
+  SERVER_URL_SOURCE="env"
+fi
 REQUESTED_PANELS=""
 ATTACH_ONLY=0
 RELOAD_LAYOUT=0
@@ -44,6 +48,7 @@ while [[ $# -gt 0 ]]; do
         exit 1
       fi
       SERVER_URL="$2"
+      SERVER_URL_SOURCE="flag"
       shift 2
       ;;
     --panels)
@@ -108,6 +113,13 @@ USER_ABORTED=0
 PERFORM_CLEANUP=0
 SESSION_ACTION=""
 SELECTED_SESSION=""
+AUTO_SERVER_HOST="127.0.0.1"
+AUTO_SERVER_PORT="${OPENCODE_AUTO_SERVER_PORT:-55306}"
+AUTO_SERVER_URL="http://${AUTO_SERVER_HOST}:${AUTO_SERVER_PORT}"
+AUTO_SERVER_LOG_FILE=""
+AUTO_SERVER_PID=""
+AUTO_SERVER_STARTED=0
+SERVER_PROBE_COMMAND=""
 declare -a STATE_SESSIONS
 declare -a LIVE_SESSIONS
 declare -a CURRENT_SESSIONS
@@ -549,6 +561,95 @@ manage_tmux_sessions() {
   return 0
 }
 
+server_is_ready() {
+  local host="$1"
+  local port="$2"
+  if [[ -z "$SERVER_PROBE_COMMAND" ]]; then
+    if command -v curl >/dev/null 2>&1; then
+      SERVER_PROBE_COMMAND="curl"
+    elif command -v nc >/dev/null 2>&1; then
+      SERVER_PROBE_COMMAND="nc"
+    elif command -v lsof >/dev/null 2>&1; then
+      SERVER_PROBE_COMMAND="lsof"
+    else
+      SERVER_PROBE_COMMAND="none"
+    fi
+  fi
+  case "$SERVER_PROBE_COMMAND" in
+    curl)
+      curl -s --max-time 1 "http://${host}:${port}/" >/dev/null 2>&1
+      return $?
+      ;;
+    nc)
+      nc -z "$host" "$port" >/dev/null 2>&1
+      return $?
+      ;;
+    lsof)
+      lsof -n -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1
+      return $?
+      ;;
+    none)
+      return 1
+      ;;
+  esac
+}
+
+wait_for_server_ready() {
+  local host="$1"
+  local port="$2"
+  if [[ -z "$SERVER_PROBE_COMMAND" ]]; then
+    server_is_ready "$host" "$port" || true
+  fi
+  if [[ "$SERVER_PROBE_COMMAND" == "none" ]]; then
+    sleep 1
+    return 0
+  fi
+  local attempts=25
+  local i=0
+  while (( i < attempts )); do
+    if server_is_ready "$host" "$port"; then
+      return 0
+    fi
+    sleep 0.2
+    i=$((i + 1))
+  done
+  return 1
+}
+
+start_managed_opencode_server() {
+  ensure_command bun "Install Bun from https://bun.sh"
+  local home="${OPENCODE_HOME:-${HOME}/.opencode}"
+  mkdir -p "${home}"
+  AUTO_SERVER_LOG_FILE="${home}/opencode-server.log"
+  pushd "${REPO_ROOT}/packages/opencode" >/dev/null
+  bun run packages/opencode/src/index.ts serve --hostname "${AUTO_SERVER_HOST}" --port "${AUTO_SERVER_PORT}" >>"${AUTO_SERVER_LOG_FILE}" 2>&1 &
+  AUTO_SERVER_PID=$!
+  popd >/dev/null
+  if ! wait_for_server_ready "${AUTO_SERVER_HOST}" "${AUTO_SERVER_PORT}"; then
+    echo "Error: Failed to start opencode server at ${AUTO_SERVER_URL}. Check ${AUTO_SERVER_LOG_FILE} for details." >&2
+    if [[ -n "${AUTO_SERVER_PID}" ]]; then
+      kill "${AUTO_SERVER_PID}" >/dev/null 2>&1 || true
+    fi
+    exit 1
+  fi
+  if [[ -n "${AUTO_SERVER_PID}" ]]; then
+    if ! kill -0 "${AUTO_SERVER_PID}" >/dev/null 2>&1; then
+      echo "Error: opencode server process exited unexpectedly. Check ${AUTO_SERVER_LOG_FILE} for details." >&2
+      exit 1
+    fi
+  fi
+  AUTO_SERVER_STARTED=1
+  echo "==> Started opencode server at ${AUTO_SERVER_URL} (logs: ${AUTO_SERVER_LOG_FILE})"
+}
+
+maybe_start_opencode_server() {
+  if server_is_ready "${AUTO_SERVER_HOST}" "${AUTO_SERVER_PORT}"; then
+    echo "==> Reusing existing opencode server at ${AUTO_SERVER_URL}"
+    return 0
+  fi
+  start_managed_opencode_server
+}
+
 on_interrupt() {
   USER_ABORTED=1
   echo ""
@@ -558,6 +659,12 @@ on_interrupt() {
 on_exit() {
   if [[ $PERFORM_CLEANUP -eq 1 ]]; then
     refresh_state_from_live
+  fi
+  if [[ $AUTO_SERVER_STARTED -eq 1 && -n "${AUTO_SERVER_PID}" ]]; then
+    if kill -0 "${AUTO_SERVER_PID}" >/dev/null 2>&1; then
+      kill "${AUTO_SERVER_PID}" >/dev/null 2>&1 || true
+      wait "${AUTO_SERVER_PID}" >/dev/null 2>&1 || true
+    fi
   fi
 }
 
@@ -576,12 +683,14 @@ function ensure_command() {
 ensure_command go "https://go.dev/doc/install"
 
 NEED_TMUX=1
-for arg in "${ALL_ARGS[@]}"; do
-  if [[ "$arg" == "--server-only" ]]; then
-    NEED_TMUX=0
-    break
-  fi
-done
+if (( ${#ALL_ARGS[@]} > 0 )); then
+  for arg in "${ALL_ARGS[@]}"; do
+    if [[ "$arg" == "--server-only" ]]; then
+      NEED_TMUX=0
+      break
+    fi
+  done
+fi
 
 if [[ $NEED_TMUX -eq 1 ]]; then
   ensure_command tmux "Install tmux via your package manager, e.g. brew install tmux"
@@ -617,6 +726,11 @@ if [[ "$SESSION_ACTION" == "create" ]]; then
   PERFORM_CLEANUP=1
 elif [[ "$SESSION_ACTION" == "reuse" ]]; then
   PERFORM_CLEANUP=1
+fi
+
+if [[ "$SERVER_URL_SOURCE" == "default" ]]; then
+  maybe_start_opencode_server
+  SERVER_URL="${AUTO_SERVER_URL}"
 fi
 
 if [[ $SKIP_BUILD -eq 0 ]]; then
