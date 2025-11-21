@@ -2558,125 +2558,142 @@ func mergeStreamingText(current, incoming string) string {
 	return current + incoming[overlap:]
 }
 
-// loadSessionsFromServer loads existing sessions from OpenCode server into local state
+// loadSessionsFromServer syncs local sessions with OpenCode server
+// Only syncs sessions that already exist in local state (for session isolation in multi-orchestrator architecture)
 func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
-	log.Printf("Loading existing sessions from OpenCode server...")
+	log.Printf("Syncing sessions with OpenCode server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
+	// Get current local state to determine which sessions belong to this tmux session
+	localState := orch.syncManager.GetState()
+	localSessionIDs := make(map[string]bool)
+	for _, s := range localState.Sessions {
+		localSessionIDs[s.ID] = true
+	}
+
+	// If no local sessions exist, this is a fresh tmux session - don't load any server sessions
+	if len(localSessionIDs) == 0 {
+		log.Printf("No local sessions found - this tmux session will start fresh")
+		return nil
+	}
+
+	log.Printf("Found %d local sessions to sync", len(localSessionIDs))
+
 	// Get sessions from server
 	sessions, err := orch.httpClient.Session.List(ctx, opencode.SessionListParams{})
-
 	if err != nil {
 		return fmt.Errorf("failed to list sessions from server: %w", err)
 	}
 
 	if sessions == nil || len(*sessions) == 0 {
-		log.Printf("No existing sessions found on server")
+		log.Printf("No sessions found on server")
 		return nil
 	}
 
-	log.Printf("Found %d existing sessions on server", len(*sessions))
+	log.Printf("Found %d sessions on server, filtering to local sessions only", len(*sessions))
 
-	// Convert server sessions to local session format and add to state
+	// Only sync sessions that exist in local state (belonging to this tmux session)
 	for _, serverSession := range *sessions {
+		// Skip sessions that don't belong to this tmux session
+		if !localSessionIDs[serverSession.ID] {
+			log.Printf("Skipping session %s (not owned by this tmux session)", serverSession.ID)
+			continue
+		}
+
 		sessionInfo := state.SessionInfo{
 			ID:           serverSession.ID,
 			Title:        serverSession.Title,
 			CreatedAt:    parseServerTime(serverSession.Time.Created),
 			UpdatedAt:    parseServerTime(serverSession.Time.Updated),
-			MessageCount: 0, // We'd need to call message endpoint to get count
+			MessageCount: 0,
 			IsActive:     true,
 		}
 
-		// Add the session through the sync manager
+		// Update the session through the sync manager
 		if err := orch.syncManager.AddSession(sessionInfo, "server-sync"); err != nil {
-			log.Printf("Warning: Failed to add session %s to local state: %v", serverSession.ID, err)
+			log.Printf("Warning: Failed to sync session %s: %v", serverSession.ID, err)
 			continue
 		}
 
-		log.Printf("Loaded session: %s (%s)", sessionInfo.Title, sessionInfo.ID)
+		log.Printf("Synced session: %s (%s)", sessionInfo.Title, sessionInfo.ID)
 	}
 
-	// After loading sessions, eagerly load message history for each session so
-	// the messages panel shows content on startup and session counts are correct.
-	for _, serverSession := range *sessions {
-		sid := serverSession.ID
-		msgs, err := orch.httpClient.Session.Messages(ctx, sid, opencode.SessionMessagesParams{})
-		if err != nil {
-			log.Printf("Warning: Failed to load messages for session %s: %v", sid, err)
-			continue
-		}
-		if msgs == nil || len(*msgs) == 0 {
-			log.Printf("No messages found for session %s", sid)
-			continue
-		}
-
-		for _, m := range *msgs {
-			var messageType string
-			var contentParts []string
-
-			switch info := m.Info.AsUnion().(type) {
-			case opencode.UserMessage:
-				messageType = "user"
-			case opencode.AssistantMessage:
-				messageType = "assistant"
-				_ = info // suppress unused in switch
-			default:
-				messageType = "system"
-			}
-
-			for _, part := range m.Parts {
-				if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
-					contentParts = append(contentParts, textPart.Text)
-				}
-			}
-
-			mi := types.MessageInfo{
-				ID:        m.Info.ID,
-				SessionID: sid,
-				Type:      messageType,
-				Content:   strings.Join(contentParts, "\n"),
-				Timestamp: time.Now(),
-				Status:    "completed",
-			}
-
-			if err := orch.syncManager.AddMessage(mi, "server-sync"); err != nil {
-				log.Printf("Warning: Failed to add message %s for session %s: %v", mi.ID, sid, err)
-			}
-		}
-	}
-
-	// Ensure CurrentSessionID is valid
+	// First, ensure CurrentSessionID is valid before loading messages
+	// This ensures proper session isolation in multi-orchestrator architecture.
 	st := orch.syncManager.GetState()
+	currentSessionID := ""
 	if len(st.Sessions) > 0 {
-		validSessionID := ""
-
 		// Prefer existing CurrentSessionID if it exists in loaded sessions
 		if st.CurrentSessionID != "" {
 			for _, s := range st.Sessions {
 				if s.ID == st.CurrentSessionID {
-					validSessionID = st.CurrentSessionID
-					log.Printf("Keeping existing session selection: %s", validSessionID)
+					currentSessionID = st.CurrentSessionID
+					log.Printf("Keeping existing session selection: %s", currentSessionID)
 					break
 				}
 			}
 		}
 
 		// If current ID is invalid or empty, select the first session
-		if validSessionID == "" {
-			validSessionID = st.Sessions[0].ID
-			log.Printf("Setting session to first available: %s", validSessionID)
+		if currentSessionID == "" {
+			currentSessionID = st.Sessions[0].ID
+			log.Printf("Setting session to first available: %s", currentSessionID)
 
-			if err := orch.syncManager.UpdateSessionSelection(validSessionID, "server-sync"); err != nil {
+			if err := orch.syncManager.UpdateSessionSelection(currentSessionID, "server-sync"); err != nil {
 				log.Printf("Warning: failed to set session selection: %v", err)
 			} else {
-				log.Printf("Successfully set CurrentSessionID: %s", validSessionID)
+				log.Printf("Successfully set CurrentSessionID: %s", currentSessionID)
 			}
 		}
 	} else {
 		log.Printf("No sessions loaded from server, CurrentSessionID will remain empty")
+	}
+
+	// Now load message history ONLY for the current session
+	if currentSessionID != "" {
+		log.Printf("Loading messages only for current session: %s", currentSessionID)
+		msgs, err := orch.httpClient.Session.Messages(ctx, currentSessionID, opencode.SessionMessagesParams{})
+		if err != nil {
+			log.Printf("Warning: Failed to load messages for session %s: %v", currentSessionID, err)
+		} else if msgs != nil && len(*msgs) > 0 {
+			for _, m := range *msgs {
+				var messageType string
+				var contentParts []string
+
+				switch info := m.Info.AsUnion().(type) {
+				case opencode.UserMessage:
+					messageType = "user"
+				case opencode.AssistantMessage:
+					messageType = "assistant"
+					_ = info // suppress unused in switch
+				default:
+					messageType = "system"
+				}
+
+				for _, part := range m.Parts {
+					if textPart, ok := part.AsUnion().(opencode.TextPart); ok {
+						contentParts = append(contentParts, textPart.Text)
+					}
+				}
+
+				mi := types.MessageInfo{
+					ID:        m.Info.ID,
+					SessionID: currentSessionID,
+					Type:      messageType,
+					Content:   strings.Join(contentParts, "\n"),
+					Timestamp: time.Now(),
+					Status:    "completed",
+				}
+
+				if err := orch.syncManager.AddMessage(mi, "server-sync"); err != nil {
+					log.Printf("Warning: Failed to add message %s for session %s: %v", mi.ID, currentSessionID, err)
+				}
+			}
+		} else {
+			log.Printf("No messages found for session %s", currentSessionID)
+		}
 	}
 
 	// Log final state for debugging

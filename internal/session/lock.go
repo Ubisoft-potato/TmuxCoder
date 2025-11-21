@@ -33,8 +33,8 @@ func AcquireLock(pidPath string) (*SessionLock, error) {
 		return nil, fmt.Errorf("failed to create lock file: %w", err)
 	}
 
-	// Write current process PID
-	fmt.Fprintf(f, "%d\n", os.Getpid())
+	// Write current process PID and start time to detect PID reuse
+	fmt.Fprintf(f, "%d %d\n", os.Getpid(), time.Now().Unix())
 	f.Sync()
 
 	return &SessionLock{
@@ -61,7 +61,8 @@ func CheckLock(pidPath string) (int, bool) {
 	}
 
 	var pid int
-	fmt.Sscanf(string(data), "%d", &pid)
+	var startTime int64
+	fmt.Sscanf(string(data), "%d %d", &pid, &startTime)
 
 	if pid == 0 {
 		return 0, false
@@ -74,8 +75,20 @@ func CheckLock(pidPath string) (int, bool) {
 	}
 
 	// Send signal 0 to detect liveness
-	err = process.Signal(syscall.Signal(0))
-	return pid, err == nil
+	if err := process.Signal(syscall.Signal(0)); err != nil {
+		return pid, false
+	}
+
+	// If start time was recorded, check if lock file is stale (older than 24 hours)
+	// This helps detect PID reuse scenarios
+	if startTime > 0 {
+		lockAge := time.Now().Unix() - startTime
+		if lockAge > 24*60*60 { // 24 hours
+			return pid, false // Treat as stale
+		}
+	}
+
+	return pid, true
 }
 
 // StopProcess stops a process by PID using SIGTERM, then SIGKILL if needed
