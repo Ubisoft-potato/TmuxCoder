@@ -144,8 +144,11 @@ start_server() {
   mkdir -p "$home"
   local log="${home}/opencode-server.log"
 
-  pushd "${REPO_ROOT}/packages/opencode" >/dev/null
-  bun run packages/opencode/src/index.ts serve --hostname "$AUTO_SERVER_HOST" --port "$AUTO_SERVER_PORT" >>"$log" 2>&1 &
+  pushd "${REPO_ROOT}/packages/opencode/packages/opencode" >/dev/null || {
+    echo "Error: opencode package directory not found" >&2
+    exit 1
+  }
+  bun run src/index.ts serve --hostname "$AUTO_SERVER_HOST" --port "$AUTO_SERVER_PORT" >>"$log" 2>&1 &
   AUTO_SERVER_PID=$!
   popd >/dev/null
 
@@ -180,6 +183,58 @@ trap 'exit 130' INT TERM
 # Check commands
 command -v go >/dev/null 2>&1 || { echo "Error: go not found" >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "Error: tmux not found" >&2; exit 1; }
+
+# Check and setup opencode dependency
+OPENCODE_DIR="${REPO_ROOT}/packages/opencode"
+if [[ ! -d "$OPENCODE_DIR" || ! -f "$OPENCODE_DIR/package.json" ]]; then
+  echo "==> Setting up opencode dependency..."
+  rm -rf "$OPENCODE_DIR" "${REPO_ROOT}/.git/modules/packages/opencode" 2>/dev/null
+  mkdir -p "$(dirname "$OPENCODE_DIR")"
+
+  # Read URL and branch from .gitmodules
+  GITMODULES="${REPO_ROOT}/.gitmodules"
+  OPENCODE_URL=$(git config -f "$GITMODULES" submodule.packages/opencode.url)
+  OPENCODE_BRANCH=$(git config -f "$GITMODULES" submodule.packages/opencode.branch)
+
+  [[ -z "$OPENCODE_URL" ]] && { echo "Error: opencode URL not found in .gitmodules" >&2; exit 1; }
+  [[ -z "$OPENCODE_BRANCH" ]] && OPENCODE_BRANCH="main"  # Default to main if branch not specified
+
+  git clone --depth 1 --branch "$OPENCODE_BRANCH" "$OPENCODE_URL" "$OPENCODE_DIR" || {
+    echo "Error: Failed to clone opencode" >&2
+    exit 1
+  }
+  echo "==> Successfully cloned opencode to $OPENCODE_DIR"
+fi
+
+# Verify opencode directory exists
+[[ ! -d "$OPENCODE_DIR" ]] && { echo "Error: opencode directory not found at $OPENCODE_DIR" >&2; exit 1; }
+
+# Install opencode dependencies if needed
+if [[ -d "$OPENCODE_DIR" && ! -d "$OPENCODE_DIR/node_modules" ]]; then
+  echo "==> Installing opencode dependencies..."
+
+  # Clean potentially problematic cache directories
+  if [[ -d "${HOME}/.npm/_libvips" ]]; then
+    echo "==> Cleaning npm libvips cache..."
+    rm -rf "${HOME}/.npm/_libvips" 2>/dev/null || {
+      echo "Warning: Could not clean npm libvips cache. You may need to run: sudo rm -rf ~/.npm/_libvips" >&2
+    }
+  fi
+
+  pushd "$OPENCODE_DIR" >/dev/null
+  # Try regular install first, fall back to forcing if needed
+  if ! bun install; then
+    echo "==> Install failed, trying with --force..."
+    bun install --force || {
+      echo "Error: Failed to install dependencies. You may need to fix permissions:" >&2
+      echo "  sudo chown -R $(whoami):staff ~/.npm" >&2
+      echo "  sudo chown -R $(whoami):staff ~/.bun" >&2
+      popd >/dev/null
+      exit 1
+    }
+  fi
+  popd >/dev/null
+fi
 
 # Session selection
 prompt_session || exit 0
