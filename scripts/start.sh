@@ -197,7 +197,7 @@ if [[ ! -d "$OPENCODE_DIR" || ! -f "$OPENCODE_DIR/package.json" ]]; then
   OPENCODE_BRANCH=$(git config -f "$GITMODULES" submodule.packages/opencode.branch)
 
   [[ -z "$OPENCODE_URL" ]] && { echo "Error: opencode URL not found in .gitmodules" >&2; exit 1; }
-  [[ -z "$OPENCODE_BRANCH" ]] && OPENCODE_BRANCH="main"  # Default to main if branch not specified
+  [[ -z "$OPENCODE_BRANCH" ]] && OPENCODE_BRANCH="main"
 
   git clone --depth 1 --branch "$OPENCODE_BRANCH" "$OPENCODE_URL" "$OPENCODE_DIR" || {
     echo "Error: Failed to clone opencode" >&2
@@ -206,34 +206,208 @@ if [[ ! -d "$OPENCODE_DIR" || ! -f "$OPENCODE_DIR/package.json" ]]; then
   echo "==> Successfully cloned opencode to $OPENCODE_DIR"
 fi
 
-# Verify opencode directory exists
-[[ ! -d "$OPENCODE_DIR" ]] && { echo "Error: opencode directory not found at $OPENCODE_DIR" >&2; exit 1; }
-
 # Install opencode dependencies if needed
-if [[ -d "$OPENCODE_DIR" && ! -d "$OPENCODE_DIR/node_modules" ]]; then
-  echo "==> Installing opencode dependencies..."
+# Note: opencode is a monorepo, need to install from root directory
+if [[ -d "$OPENCODE_DIR" ]]; then
+  if [[ ! -d "$OPENCODE_DIR/node_modules" ]] || [[ ! -d "$OPENCODE_DIR/node_modules/solid-js" ]]; then
+    echo "==> Installing opencode dependencies..."
 
-  # Clean potentially problematic cache directories
-  if [[ -d "${HOME}/.npm/_libvips" ]]; then
-    echo "==> Cleaning npm libvips cache..."
-    rm -rf "${HOME}/.npm/_libvips" 2>/dev/null || {
-      echo "Warning: Could not clean npm libvips cache. You may need to run: sudo rm -rf ~/.npm/_libvips" >&2
-    }
-  fi
+    # Check for permission issues in cache directories
+    echo "    Checking cache permissions..."
+    permission_issues=0
 
-  pushd "$OPENCODE_DIR" >/dev/null
-  # Try regular install first, fall back to forcing if needed
-  if ! bun install; then
-    echo "==> Install failed, trying with --force..."
-    bun install --force || {
-      echo "Error: Failed to install dependencies. You may need to fix permissions:" >&2
-      echo "  sudo chown -R $(whoami):staff ~/.npm" >&2
-      echo "  sudo chown -R $(whoami):staff ~/.bun" >&2
-      popd >/dev/null
-      exit 1
-    }
+    # Check for root-owned files in bun cache
+    if [[ -d "${HOME}/.bun/install/cache" ]]; then
+      if find "${HOME}/.bun/install/cache" -user root -print -quit 2>/dev/null | grep -q .; then
+        echo "    ⚠ Warning: Found root-owned files in bun cache" >&2
+        permission_issues=1
+      fi
+    fi
+
+    # Check for root-owned files in npm cache
+    if [[ -d "${HOME}/.npm" ]]; then
+      if find "${HOME}/.npm" -user root -print -quit 2>/dev/null | grep -q .; then
+        echo "    ⚠ Warning: Found root-owned files in npm cache" >&2
+        permission_issues=1
+      fi
+    fi
+
+    if [[ $permission_issues -eq 1 ]]; then
+      echo ""
+      echo "    To fix permission issues, run these commands:" >&2
+      echo "      sudo chown -R \$(whoami):staff ~/.bun" >&2
+      echo "      sudo chown -R \$(whoami):staff ~/.npm" >&2
+      echo ""
+      read -p "    Fix permissions now? (requires sudo) [y/N]: " -n 1 -r
+      echo
+      if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "    Fixing permissions..."
+        sudo chown -R $(whoami):staff ~/.bun ~/.npm 2>&1 || {
+          echo "    Failed to fix permissions. Please run the commands manually." >&2
+        }
+      else
+        echo "    Continuing anyway (installation may fail)..."
+      fi
+    fi
+
+    # Clean potentially problematic cache directories
+    if [[ -d "${HOME}/.npm/_libvips" ]]; then
+      echo "    Cleaning npm libvips cache..."
+      rm -rf "${HOME}/.npm/_libvips" 2>/dev/null || {
+        echo "    Warning: Could not clean npm libvips cache" >&2
+      }
+    fi
+
+    pushd "$OPENCODE_DIR" >/dev/null
+
+    # Use a log file for full installation output
+    INSTALL_LOG="${HOME}/.opencode/opencode-install.log"
+    mkdir -p "$(dirname "$INSTALL_LOG")"
+
+    echo "    Installing dependencies (this may take a few minutes)..."
+    echo "    Full log: $INSTALL_LOG"
+    echo ""
+
+    # Show filtered progress
+    (bun install 2>&1 | tee "$INSTALL_LOG" | while IFS= read -r line; do
+      # Show lines with emojis (bun progress indicators) or important keywords
+      if echo "$line" | grep -qE '(📦|🚚|✓|⚠|✗|error|Error|warning|Warning|Saved|Installing \[)'; then
+        echo "    $line"
+      fi
+    done) &
+    INSTALL_PID=$!
+
+    # Wait for installation to complete
+    wait $INSTALL_PID
+    INSTALL_EXIT=$?
+
+    if [ $INSTALL_EXIT -eq 0 ]; then
+      echo ""
+      echo "==> OpenCode dependencies installed successfully"
+
+      # Check for missing catalog dependencies (bun workspace catalog issue)
+      # These are needed but not always installed correctly by bun install
+      OPENCODE_PKG="${OPENCODE_DIR}/packages/opencode"
+      if [[ -d "$OPENCODE_PKG" ]]; then
+        echo "    Checking for catalog dependencies..."
+
+        missing_deps=()
+
+        # Check for solid-js
+        if [[ ! -d "$OPENCODE_PKG/node_modules/solid-js" ]]; then
+          missing_deps+=("solid-js@1.9.9")
+        fi
+
+        # Check for react (needed for jsx-dev-runtime)
+        if [[ ! -d "$OPENCODE_PKG/node_modules/react" ]]; then
+          missing_deps+=("react@18" "react-dom@18")
+        fi
+
+        if [[ ${#missing_deps[@]} -gt 0 ]]; then
+          echo "    Installing missing catalog dependencies: ${missing_deps[*]}"
+          pushd "$OPENCODE_PKG" >/dev/null
+          bun add ${missing_deps[@]} >>"$INSTALL_LOG" 2>&1 || {
+            echo "    Warning: Failed to install some dependencies" >&2
+          }
+          popd >/dev/null
+          echo "    ✓ Catalog dependencies installed"
+        fi
+      fi
+    else
+      echo ""
+      echo "==> Installation encountered errors, trying with --force..."
+
+      (bun install --force 2>&1 | tee -a "$INSTALL_LOG" | while IFS= read -r line; do
+        if echo "$line" | grep -qE '(📦|🚚|✓|⚠|✗|error|Error|warning|Warning|Saved|Installing \[)'; then
+          echo "    $line"
+        fi
+      done) &
+      INSTALL_PID=$!
+
+      wait $INSTALL_PID
+      INSTALL_EXIT=$?
+
+      if [ $INSTALL_EXIT -eq 0 ]; then
+        echo ""
+        echo "==> OpenCode dependencies installed successfully"
+
+        # Check for missing catalog dependencies (bun workspace catalog issue)
+        OPENCODE_PKG="${OPENCODE_DIR}/packages/opencode"
+        if [[ -d "$OPENCODE_PKG" ]]; then
+          echo "    Checking for catalog dependencies..."
+
+          missing_deps=()
+
+          # Check for solid-js
+          if [[ ! -d "$OPENCODE_PKG/node_modules/solid-js" ]]; then
+            missing_deps+=("solid-js@1.9.9")
+          fi
+
+          # Check for react (needed for jsx-dev-runtime)
+          if [[ ! -d "$OPENCODE_PKG/node_modules/react" ]]; then
+            missing_deps+=("react@18" "react-dom@18")
+          fi
+
+          if [[ ${#missing_deps[@]} -gt 0 ]]; then
+            echo "    Installing missing catalog dependencies: ${missing_deps[*]}"
+            pushd "$OPENCODE_PKG" >/dev/null
+            bun add ${missing_deps[@]} >>"$INSTALL_LOG" 2>&1 || {
+              echo "    Warning: Failed to install some dependencies" >&2
+            }
+            popd >/dev/null
+            echo "    ✓ Catalog dependencies installed"
+          fi
+        fi
+      else
+        echo ""
+        echo "Error: Failed to install dependencies." >&2
+        echo "Check the log at: $INSTALL_LOG" >&2
+        echo "" >&2
+        echo "You may need to fix permissions:" >&2
+        echo "  sudo chown -R $(whoami):staff ~/.npm ~/.bun" >&2
+        echo "" >&2
+        echo "Or install manually:" >&2
+        echo "  cd $OPENCODE_PKG_DIR" >&2
+        echo "  bun install" >&2
+        popd >/dev/null
+        exit 1
+      fi
+    fi
+    popd >/dev/null
+  else
+    echo "==> OpenCode dependencies already installed"
+
+    # Still check for missing catalog dependencies even if node_modules exists
+    OPENCODE_PKG="${OPENCODE_DIR}/packages/opencode"
+    if [[ -d "$OPENCODE_PKG" ]]; then
+      missing_deps=()
+
+      # Check for solid-js
+      if [[ ! -d "$OPENCODE_PKG/node_modules/solid-js" ]]; then
+        missing_deps+=("solid-js@1.9.9")
+      fi
+
+      # Check for react (needed for jsx-dev-runtime)
+      if [[ ! -d "$OPENCODE_PKG/node_modules/react" ]]; then
+        missing_deps+=("react@18" "react-dom@18")
+      fi
+
+      if [[ ${#missing_deps[@]} -gt 0 ]]; then
+        echo "    Installing missing catalog dependencies: ${missing_deps[*]}"
+        INSTALL_LOG="${HOME}/.opencode/opencode-install.log"
+        mkdir -p "$(dirname "$INSTALL_LOG")"
+
+        pushd "$OPENCODE_PKG" >/dev/null
+        bun add ${missing_deps[@]} >>"$INSTALL_LOG" 2>&1 || {
+          echo "    Warning: Failed to install some dependencies" >&2
+        }
+        popd >/dev/null
+        echo "    ✓ Catalog dependencies installed"
+      fi
+    fi
   fi
-  popd >/dev/null
+else
+  echo "Warning: OpenCode directory not found at $OPENCODE_DIR" >&2
 fi
 
 # Session selection

@@ -21,25 +21,16 @@ func main() {
 		}
 	}
 
-	// Get the directory where the binary is located
-	execPath, err := os.Executable()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to determine executable path: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Resolve symlinks
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error: failed to resolve symlink: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Get the project root (assuming binary is in cmd/tmuxcoder/dist/ or similar)
-	binDir := filepath.Dir(execPath)
-	projectRoot := findProjectRoot(binDir)
+	// Find project root - try multiple strategies
+	projectRoot := findProjectRoot()
 	if projectRoot == "" {
 		fmt.Fprintf(os.Stderr, "Error: could not find project root (looking for scripts/start.sh)\n")
+		fmt.Fprintf(os.Stderr, "\nPlease run tmuxcoder from the project directory, or set TMUXCODER_ROOT:\n")
+		fmt.Fprintf(os.Stderr, "  cd /path/to/TmuxCoder\n")
+		fmt.Fprintf(os.Stderr, "  ./tmuxcoder\n")
+		fmt.Fprintf(os.Stderr, "\nOr:\n")
+		fmt.Fprintf(os.Stderr, "  export TMUXCODER_ROOT=/path/to/TmuxCoder\n")
+		fmt.Fprintf(os.Stderr, "  tmuxcoder\n")
 		os.Exit(1)
 	}
 
@@ -72,12 +63,57 @@ func main() {
 	}
 }
 
-// findProjectRoot searches upward from the given directory to find the project root
-func findProjectRoot(startDir string) string {
+// findProjectRoot tries multiple strategies to find the project root
+func findProjectRoot() string {
+	// Strategy 1: Check TMUXCODER_ROOT environment variable
+	if root := os.Getenv("TMUXCODER_ROOT"); root != "" {
+		if isProjectRoot(root) {
+			return root
+		}
+	}
+
+	// Strategy 2: Check current working directory
+	if cwd, err := os.Getwd(); err == nil {
+		if isProjectRoot(cwd) {
+			return cwd
+		}
+		// Also try searching upward from cwd
+		if root := searchUpward(cwd); root != "" {
+			return root
+		}
+	}
+
+	// Strategy 3: Try to find from executable location (for when running ./tmuxcoder)
+	if execPath, err := os.Executable(); err == nil {
+		execPath, _ = filepath.EvalSymlinks(execPath)
+		execDir := filepath.Dir(execPath)
+
+		// If running from project directory (./tmuxcoder)
+		if isProjectRoot(execDir) {
+			return execDir
+		}
+
+		// Try searching upward from executable location
+		if root := searchUpward(execDir); root != "" {
+			return root
+		}
+	}
+
+	return ""
+}
+
+// isProjectRoot checks if a directory is the project root
+func isProjectRoot(dir string) bool {
+	scriptPath := filepath.Join(dir, "scripts", "start.sh")
+	_, err := os.Stat(scriptPath)
+	return err == nil
+}
+
+// searchUpward searches for project root by going up the directory tree
+func searchUpward(startDir string) string {
 	dir := startDir
 	for {
-		scriptPath := filepath.Join(dir, "scripts", "start.sh")
-		if _, err := os.Stat(scriptPath); err == nil {
+		if isProjectRoot(dir) {
 			return dir
 		}
 
@@ -105,7 +141,12 @@ OPTIONS:
     -- <args>            Pass additional arguments to opencode-tmux
 
 EXAMPLES:
-    # Start tmuxcoder (builds and launches)
+    # Start tmuxcoder (from project directory)
+    cd /path/to/TmuxCoder
+    tmuxcoder
+
+    # Or set TMUXCODER_ROOT to run from anywhere
+    export TMUXCODER_ROOT=/path/to/TmuxCoder
     tmuxcoder
 
     # Skip build step if binaries already exist
@@ -118,6 +159,7 @@ EXAMPLES:
     tmuxcoder --server http://localhost:8080
 
 ENVIRONMENT VARIABLES:
+    TMUXCODER_ROOT            Path to TmuxCoder project directory
     OPENCODE_SERVER           OpenCode API server URL
     OPENCODE_SOCKET           IPC socket path (default: ~/.opencode/ipc.sock)
     OPENCODE_STATE            State file path (default: ~/.opencode/state.json)
