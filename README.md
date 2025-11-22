@@ -57,31 +57,53 @@ _Coming soon - add screenshots showing the three-pane layout in action_
 - Bash, sed, awk (for start script)
 - OpenCode-compatible API server
 
-## Installation & Build
+## Installation
+
+### Quick Install (Recommended)
+
+Run the automated installation script:
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/Ubisoft-potato/TmuxCoder
 cd tmux_coder
-git submodule update --init --recursive  # Initialize opencode submodule
-go mod download
+./install.sh
+```
+
+This will:
+- Check all dependencies (Go, tmux, bun)
+- Setup the opencode submodule
+- Build all binaries
+- Install `tmuxcoder` command to your system
+- Create default configuration
+
+### One-Command Launch
+
+After installation, start TmuxCoder with a single command:
+
+```bash
+tmuxcoder           # If installed to system/user bin
+# OR
+./tmuxcoder         # Run from project directory
+```
 ```
 
 > **Note:** This project includes [opencode](https://github.com/sst/opencode) as a git submodule in `packages/opencode/`. The submodule provides the OpenCode server and SDK.
-
-**Build binaries:**
+## Quick Start
+**After installation, simply run:**
 
 ```bash
-go build ./cmd/opencode-tmux
-go build ./cmd/opencode-input
-go build ./cmd/opencode-messages
-go build ./cmd/opencode-sessions
+tmuxcoder           # If installed to PATH
+# OR
+./tmuxcoder         # From project directory
 ```
 
-Or let `scripts/start.sh` build them automatically (use `--skip-build` to skip).
+This will:
+1. Check and install OpenCode dependencies (with progress display)
+2. Auto-build binaries if needed
+3. Setup and start the OpenCode server
+4. Create/attach to a tmux session with the TUI interface
 
-## Quick Start
-
-**1. Set environment variables:**
+**Environment variables (optional):**
 
 ```bash
 export OPENCODE_SERVER="http://127.0.0.1:62435"
@@ -91,6 +113,7 @@ export OPENCODE_TMUX_CONFIG="${HOME}/.opencode/tmux.yaml" # optional
 ```
 
 **2. Create layout config** (optional, defaults provided) at `~/.opencode/tmux.yaml`:
+The installation script creates a default config. You can customize it:
 
 ```yaml
 version: "1.0"
@@ -117,19 +140,37 @@ splits:
     ratio: "3:1"
 ```
 
-**3. Launch:**
+**Alternative: Use the start script directly**
 
 ```bash
 ./scripts/start.sh
 ```
 
-The script builds binaries, starts the orchestrator, and attaches to the tmux session.
+## Usage
 
-**4. Detach/reattach:**
+**CLI Commands:**
 
 ```bash
-tmux detach          # or Ctrl-b d
-tmux attach -t tmux-coder
+# Start tmuxcoder (auto-build if needed)
+tmuxcoder
+
+# Show help
+tmuxcoder --help
+
+# Show version
+tmuxcoder --version
+
+# Skip build step (faster if binaries exist)
+tmuxcoder --skip-build
+
+# Attach to existing session only
+tmuxcoder --attach-only
+
+# Use custom server
+tmuxcoder --server http://localhost:8080
+
+# Pass additional arguments to opencode-tmux
+tmuxcoder -- --reload-layout
 ```
 
 ## Usage
@@ -139,7 +180,7 @@ tmux attach -t tmux-coder
 ```bash
 ./scripts/start.sh [options]
 
---panels sessions,messages    # Rebuild specific panels only
+
 --attach-only                 # Attach to existing session
 --reload-layout               # Hot-reload layout without restart
 --server <URL>                # Override OPENCODE_SERVER
@@ -149,9 +190,9 @@ tmux attach -t tmux-coder
 **Direct binary flags:**
 
 ```bash
-./opencode-tmux --reuse-session       # Reuse existing session
-./opencode-tmux --force-new-session   # Force new session
-./opencode-tmux --reload-layout       # Reload layout
+./cmd/opencode-tmux/dist/opencode-tmux --reuse-session       # Reuse existing session
+./cmd/opencode-tmux/dist/opencode-tmux --force-new-session   # Force new session
+./cmd/opencode-tmux/dist/opencode-tmux --reload-layout       # Reload layout
 ```
 
 **Default layout:**
