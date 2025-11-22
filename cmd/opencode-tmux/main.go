@@ -59,6 +59,8 @@ type TmuxOrchestrator struct {
 	paneSupervisorMu sync.Mutex
 	paneSupervisors  map[string]context.CancelFunc
 	lock             *session.SessionLock
+	messageRoles     map[string]string // Track message ID -> role mapping for handling parts
+	messageRolesMu   sync.Mutex        // Protect messageRoles map
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
@@ -79,6 +81,7 @@ func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, h
 		layout:          layout,
 		panes:           map[string]string{},
 		paneSupervisors: map[string]context.CancelFunc{},
+		messageRoles:    map[string]string{},
 		reuseExisting:   reuseExisting,
 		forceNewSession: forceNew,
 		attachOnly:      attachOnly,
@@ -2288,10 +2291,20 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
 					log.Printf("[SSE] Message metadata exists but already completed; skipping status update: %s", msg.ID)
 				}
 			} else {
-				if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {
-					log.Printf("[SSE] Failed to add message: %v", err)
+				// Track message role for later use when parts arrive
+				orch.messageRolesMu.Lock()
+				orch.messageRoles[msg.ID] = msg.Type
+				orch.messageRolesMu.Unlock()
+
+				// Skip user messages with no content - they'll be added when content arrives via message.part.updated
+				if info.Role == opencode.MessageRoleUser && msg.Content == "" {
+					log.Printf("[SSE] Skipping empty user message; waiting for content: %s", msg.ID)
 				} else {
-					log.Printf("[SSE] Message metadata added: %s", msg.ID)
+					if err := orch.syncManager.AddMessage(msg, "sse"); err != nil {
+						log.Printf("[SSE] Failed to add message: %v", err)
+					} else {
+						log.Printf("[SSE] Message metadata added: %s", msg.ID)
+					}
 				}
 			}
 		} else {
@@ -2337,16 +2350,30 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
 			}
 			// If message doesn't exist yet (part arrived before metadata), create it
 			if !exists {
+				// Determine message type from tracked roles or default to assistant
+				messageType := "assistant"
+				messageStatus := "pending"
+				orch.messageRolesMu.Lock()
+				if role, ok := orch.messageRoles[messageID]; ok {
+					messageType = role
+					if messageType == "user" {
+						messageStatus = "completed"
+					}
+				}
+				orch.messageRolesMu.Unlock()
+
 				placeholder := types.MessageInfo{
 					ID:        messageID,
 					SessionID: part.SessionID,
-					Type:      "assistant",
+					Type:      messageType,
 					Content:   "",
 					Timestamp: time.Now(),
-					Status:    "pending",
+					Status:    messageStatus,
 				}
 				if err := orch.syncManager.AddMessage(placeholder, "sse"); err != nil {
 					log.Printf("[SSE] Failed to create placeholder message %s: %v", messageID, err)
+				} else {
+					log.Printf("[SSE] Created placeholder message %s with type %s", messageID, messageType)
 				}
 			}
 			// Log diagnostic info before merging
