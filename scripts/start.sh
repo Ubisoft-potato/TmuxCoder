@@ -181,6 +181,35 @@ trap 'exit 130' INT TERM
 command -v go >/dev/null 2>&1 || { echo "Error: go not found" >&2; exit 1; }
 command -v tmux >/dev/null 2>&1 || { echo "Error: tmux not found" >&2; exit 1; }
 
+# Check and setup opencode dependency
+OPENCODE_DIR="${REPO_ROOT}/packages/opencode"
+if [[ ! -d "$OPENCODE_DIR" || ! -f "$OPENCODE_DIR/package.json" ]]; then
+  echo "==> Setting up opencode dependency..."
+  rm -rf "$OPENCODE_DIR" "${REPO_ROOT}/.git/modules/packages/opencode" 2>/dev/null
+  mkdir -p "$(dirname "$OPENCODE_DIR")"
+
+  # Read URL and branch from .gitmodules
+  GITMODULES="${REPO_ROOT}/.gitmodules"
+  OPENCODE_URL=$(git config -f "$GITMODULES" submodule.packages/opencode.url)
+  OPENCODE_BRANCH=$(git config -f "$GITMODULES" submodule.packages/opencode.branch)
+
+  [[ -z "$OPENCODE_URL" ]] && { echo "Error: opencode URL not found in .gitmodules" >&2; exit 1; }
+  [[ -z "$OPENCODE_BRANCH" ]] && OPENCODE_BRANCH="main"  # Default to main if branch not specified
+
+  git clone --depth 1 --branch "$OPENCODE_BRANCH" "$OPENCODE_URL" "$OPENCODE_DIR" || {
+    echo "Error: Failed to clone opencode" >&2
+    exit 1
+  }
+fi
+
+# Install opencode dependencies if needed
+if [[ -d "$OPENCODE_DIR" && ! -d "$OPENCODE_DIR/node_modules" ]]; then
+  echo "==> Installing opencode dependencies..."
+  pushd "$OPENCODE_DIR" >/dev/null
+  bun install
+  popd >/dev/null
+fi
+
 # Session selection
 prompt_session || exit 0
 

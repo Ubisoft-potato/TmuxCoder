@@ -302,7 +302,7 @@ var completionSuggestions = []string{
 	"models",
 	"agents",
 	"clear",
-	"agent",
+	// "agent",
 	// "share",
 	// "unshare",
 	"compact",
@@ -1273,6 +1273,7 @@ func (p *InputPanel) handleCommand() (tea.Model, tea.Cmd) {
 	case "/agents":
 		cmdToExecute = p.openAgentDialog()
 	case "/clear":
+		log.Printf("[INPUT] /clear command received, currentSessionID: %s", p.currentSessionID)
 		cmdToExecute = p.clearMessages()
 	case "/new":
 		cmdToExecute = p.createNewSession()
@@ -1888,19 +1889,18 @@ func (p *InputPanel) clearMessages() tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
-		// First, delete messages from backend
+		// Try to delete messages from backend (but continue even if it fails)
 		response, err := p.client.Session.ClearMessages(ctx, p.currentSessionID)
 		if err != nil {
-			log.Printf("[INPUT] Failed to clear messages from backend: %v", err)
-			return ErrorMsg{Error: fmt.Errorf("failed to clear messages: %w", err)}
+			log.Printf("[INPUT] Backend clear messages failed (continuing with local clear): %v", err)
+			// Don't return error - continue to clear local state
+		} else {
+			cleared := int64(0)
+			if response != nil {
+				cleared = response.Count
+			}
+			log.Printf("[INPUT] Successfully cleared %d messages from backend for session %s", cleared, p.currentSessionID)
 		}
-
-		cleared := int64(0)
-		if response != nil {
-			cleared = response.Count
-		}
-
-		log.Printf("[INPUT] Successfully cleared %d messages from backend for session %s", cleared, p.currentSessionID)
 
 		if err := purgeLocalSessionMessages(p.currentSessionID); err != nil {
 			log.Printf("[INPUT] Failed to purge local messages for session %s: %v", p.currentSessionID, err)
@@ -3301,7 +3301,7 @@ func (p *InputPanel) renderCompletionDialog() string {
 	// Title line with close hint
 	title := " Command Completion "
 	closeHint := " esc "
-	padding := dialogWidth - len(title) - len(closeHint) - 2
+	padding := dialogWidth - runewidth.StringWidth(title) - runewidth.StringWidth(closeHint) - 2
 	if padding < 0 {
 		padding = 0
 	}
@@ -3321,10 +3321,10 @@ func (p *InputPanel) renderCompletionDialog() string {
 	// Show scroll up indicator if needed
 	if visibleStart > 0 {
 		scrollUpLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↑" + strings.Repeat(" ", (dialogWidth-3)/2)
-		if len(scrollUpLine) > dialogWidth-2 {
-			scrollUpLine = scrollUpLine[:dialogWidth-2]
+		if runewidth.StringWidth(scrollUpLine) > dialogWidth-2 {
+			scrollUpLine = runewidth.Truncate(scrollUpLine, dialogWidth-2, "")
 		}
-		scrollUpPadding := dialogWidth - len(scrollUpLine) - 2
+		scrollUpPadding := dialogWidth - runewidth.StringWidth(scrollUpLine) - 2
 		if scrollUpPadding < 0 {
 			scrollUpPadding = 0
 		}
@@ -3347,7 +3347,7 @@ func (p *InputPanel) renderCompletionDialog() string {
 		}
 
 		commandLine := prefix + " " + command
-		commandPadding := dialogWidth - len(commandLine) - 2
+		commandPadding := dialogWidth - runewidth.StringWidth(commandLine) - 2
 		if commandPadding < 0 {
 			commandPadding = 0
 		}
@@ -3357,10 +3357,10 @@ func (p *InputPanel) renderCompletionDialog() string {
 	// Show scroll down indicator if needed
 	if visibleEnd < totalCommands {
 		scrollDownLine := strings.Repeat(" ", (dialogWidth-3)/2) + "↓" + strings.Repeat(" ", (dialogWidth-3)/2)
-		if len(scrollDownLine) > dialogWidth-2 {
-			scrollDownLine = scrollDownLine[:dialogWidth-2]
+		if runewidth.StringWidth(scrollDownLine) > dialogWidth-2 {
+			scrollDownLine = runewidth.Truncate(scrollDownLine, dialogWidth-2, "")
 		}
-		scrollDownPadding := dialogWidth - len(scrollDownLine) - 2
+		scrollDownPadding := dialogWidth - runewidth.StringWidth(scrollDownLine) - 2
 		if scrollDownPadding < 0 {
 			scrollDownPadding = 0
 		}
@@ -3393,9 +3393,11 @@ func (p *InputPanel) renderCompletionDialog() string {
 		lines := strings.Split(bottomLine, "\n")
 		if len(lines) > 0 {
 			lastLine := lines[len(lines)-1]
-			if len(lastLine) >= len(scrollInfo)+1 {
+			scrollInfoWidth := runewidth.StringWidth(scrollInfo)
+			lastLineWidth := runewidth.StringWidth(lastLine)
+			if lastLineWidth >= scrollInfoWidth+1 {
 				// Replace part of bottom border with scroll info
-				newLastLine := lastLine[:len(lastLine)-len(scrollInfo)-1] + scrollInfo + "┘"
+				newLastLine := runewidth.Truncate(lastLine, lastLineWidth-scrollInfoWidth-1, "") + scrollInfo + "┘"
 				lines[len(lines)-1] = newLastLine
 				result.Reset()
 				result.WriteString(strings.Join(lines, "\n"))

@@ -88,6 +88,7 @@ type MessagesPanel struct {
 	isStreaming      bool
 	currentMessage   *types.MessageInfo
 	version          int64
+	clearVersion     int64 // Version at which messages were cleared - ignore events before this
 	eventsChan       chan state.StateEvent
 	markdownMode     bool // true for markdown rendering, false for plain text
 	lineRenderer     *LineBasedRenderer
@@ -632,6 +633,11 @@ func (p *MessagesPanel) startEventStream() tea.Cmd {
 // Event handlers
 
 func (p *MessagesPanel) handleMessageAdded(event state.StateEvent) error {
+	// Ignore messages that came before or at the clear event
+	if p.clearVersion > 0 && event.Version <= p.clearVersion {
+		log.Printf("[MESSAGES] Ignoring message add event v%v (cleared at v%v)", event.Version, p.clearVersion)
+		return nil
+	}
 	p.version = event.Version
 	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
 		var payload types.MessageAddPayload
@@ -725,34 +731,53 @@ func (p *MessagesPanel) handleMessageDeleted(event state.StateEvent) error {
 }
 
 func (p *MessagesPanel) handleMessagesCleared(event state.StateEvent) error {
+	log.Printf("[MESSAGES] handleMessagesCleared called, event data type: %T, data: %+v", event.Data, event.Data)
 	p.version = event.Version
-	if payloadMap, ok := event.Data.(map[string]interface{}); ok {
-		var payload types.MessagesClearPayload
+	// Set clearVersion to ignore any message events with version <= this
+	p.clearVersion = event.Version
+
+	var payload types.MessagesClearPayload
+	var decoded bool
+
+	// Try direct type assertion first (when event comes from same process)
+	if directPayload, ok := event.Data.(types.MessagesClearPayload); ok {
+		payload = directPayload
+		decoded = true
+	} else if payloadMap, ok := event.Data.(map[string]interface{}); ok {
+		// Try decoding from map (when event comes from IPC)
 		if err := decodePayload(payloadMap, &payload); err == nil {
-			// Filter out messages from the cleared session
-			originalCount := len(p.messages)
-			filteredMessages := make([]types.MessageInfo, 0)
-			for _, msg := range p.messages {
-				if msg.SessionID != payload.SessionID {
-					filteredMessages = append(filteredMessages, msg)
-				}
-			}
-			p.messages = filteredMessages
+			decoded = true
+		} else {
+			log.Printf("[MESSAGES] Failed to decode clear payload from map: %v", err)
+		}
+	} else {
+		log.Printf("[MESSAGES] Unknown event data type for clear: %T", event.Data)
+	}
 
-			log.Printf("[MESSAGES] v%v Messages cleared for session %s (removed %d messages)",
-				event.Version, payload.SessionID, originalCount-len(p.messages))
-
-			// Rebuild rendered lines
-			mode := "plain"
-			if p.markdownMode {
-				mode = "markdown"
+	if decoded {
+		// Filter out messages from the cleared session
+		originalCount := len(p.messages)
+		filteredMessages := make([]types.MessageInfo, 0)
+		for _, msg := range p.messages {
+			if msg.SessionID != payload.SessionID {
+				filteredMessages = append(filteredMessages, msg)
 			}
-			p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+		}
+		p.messages = filteredMessages
 
-			// Auto-scroll to bottom if enabled
-			if p.autoScroll {
-				p.scrollToBottom()
-			}
+		log.Printf("[MESSAGES] v%v Messages cleared for session %s (removed %d messages)",
+			event.Version, payload.SessionID, originalCount-len(p.messages))
+
+		// Rebuild rendered lines
+		mode := "plain"
+		if p.markdownMode {
+			mode = "markdown"
+		}
+		p.lineRenderer.rebuildRenderedLines(p.messages, p.width, mode, p.showTimestamps)
+
+		// Auto-scroll to bottom if enabled
+		if p.autoScroll {
+			p.scrollToBottom()
 		}
 	}
 	return nil

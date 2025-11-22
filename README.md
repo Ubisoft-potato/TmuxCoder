@@ -75,6 +75,7 @@ git clone <your-repo-url>
 cd tmux_coder
 git submodule update --init --recursive  # Initialize opencode submodule
 go mod download
+cd packages/opencode && bun install
 ```
 
 > **Note:** This project includes [opencode](https://github.com/sst/opencode) as a git submodule in `packages/opencode/`. The submodule provides the OpenCode server and SDK.
