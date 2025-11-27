@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opencode/tmux_coder/internal/client"
 	tmuxconfig "github.com/opencode/tmux_coder/internal/config"
 	"github.com/opencode/tmux_coder/internal/ipc"
 	panelregistry "github.com/opencode/tmux_coder/internal/panel"
@@ -61,6 +62,9 @@ type TmuxOrchestrator struct {
 	lock             *session.SessionLock
 	messageRoles     map[string]string // Track message ID -> role mapping for handling parts
 	messageRolesMu   sync.Mutex        // Protect messageRoles map
+
+	// Stage 1: Infrastructure (not yet used, will be activated in later stages)
+	clientTracker *client.ClientTracker
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
@@ -113,6 +117,14 @@ func (orch *TmuxOrchestrator) Initialize() error {
 	if err := orch.startIPCServer(); err != nil {
 		return fmt.Errorf("failed to start IPC server: %w", err)
 	}
+
+	// Stage 1: Initialize client tracker (no-op, not monitoring yet)
+	orch.clientTracker = client.NewClientTracker(
+		orch.sessionName,
+		orch.tmuxCommand,
+		5*time.Second,
+	)
+	log.Printf("[Stage 1] Client tracker initialized (monitoring not started)")
 
 	// Start API request handler for TUI control
 	go orch.startAPIRequestHandler()
