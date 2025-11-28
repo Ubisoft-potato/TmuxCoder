@@ -36,6 +36,29 @@ import (
 	"github.com/sst/opencode-sdk-go/option"
 )
 
+// RunMode defines how the orchestrator handles signals
+type RunMode int
+
+const (
+	// ModeForeground: Ctrl+C triggers cleanup shutdown (default, backward compatible)
+	ModeForeground RunMode = iota
+
+	// ModeDaemon: Ctrl+C ignored, only IPC shutdown commands stop the daemon
+	ModeDaemon
+)
+
+// String returns the string representation of RunMode
+func (m RunMode) String() string {
+	switch m {
+	case ModeForeground:
+		return "Foreground"
+	case ModeDaemon:
+		return "Daemon"
+	default:
+		return "Unknown"
+	}
+}
+
 // TmuxOrchestrator manages the tmux session and panels
 type TmuxOrchestrator struct {
 	sessionName      string
@@ -66,10 +89,13 @@ type TmuxOrchestrator struct {
 
 	// Stage 1: Infrastructure (not yet used, will be activated in later stages)
 	clientTracker *client.ClientTracker
+
+	// Stage 3: Signal Handling
+	runMode RunMode // Default: ModeForeground for backward compatibility
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
-func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, httpClient *opencode.Client, serverOnly bool, layout *tmuxconfig.Layout, reuseExisting bool, forceNew bool, attachOnly bool, configPath string) *TmuxOrchestrator {
+func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, httpClient *opencode.Client, serverOnly bool, layout *tmuxconfig.Layout, reuseExisting bool, forceNew bool, attachOnly bool, configPath string, runMode RunMode) *TmuxOrchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return &TmuxOrchestrator{
@@ -91,6 +117,7 @@ func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, h
 		forceNewSession: forceNew,
 		attachOnly:      attachOnly,
 		configPath:      configPath,
+		runMode:         runMode, // Stage 3: Signal handling mode
 	}
 }
 
@@ -1932,13 +1959,126 @@ func (orch *TmuxOrchestrator) attachToSession() error {
 	return cmd.Run()
 }
 
+// detachAsDaemon re-executes the current process as a detached daemon.
+// This is Stage 3.5: Daemon Detachment implementation.
+//
+// The parent process will:
+// 1. Re-execute itself with the same arguments
+// 2. Set Setsid=true to create a new session (detach from terminal)
+// 3. Redirect stdin/stdout/stderr appropriately
+// 4. Set OPENCODE_DAEMON_DETACHED=1 environment variable to prevent infinite loop
+// 5. Exit immediately, allowing shell to return
+//
+// The child process will:
+// 1. Detect OPENCODE_DAEMON_DETACHED=1 and skip detachment
+// 2. Continue normal daemon startup (acquire lock, start IPC server, etc.)
+// 3. Run as a true background daemon with PPID=1
+func detachAsDaemon() error {
+	// Get current executable path
+	executable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("failed to get executable path: %w", err)
+	}
+
+	// Prepare command with same arguments
+	cmd := exec.Command(executable, os.Args[1:]...)
+
+	// Add environment variable to mark child as detached
+	cmd.Env = append(os.Environ(), "OPENCODE_DAEMON_DETACHED=1")
+
+	// Configure process attributes for detachment
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Setsid: true,  // Create new session, detach from controlling terminal
+	}
+
+	// Redirect stdin to /dev/null
+	devNull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
+	if err != nil {
+		return fmt.Errorf("failed to open /dev/null for stdin: %w", err)
+	}
+	defer devNull.Close()
+
+	cmd.Stdin = devNull
+	cmd.Stdout = devNull
+	cmd.Stderr = devNull
+
+	// Start the detached child process
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("failed to start detached process: %w", err)
+	}
+
+	childPID := cmd.Process.Pid
+
+	// Release the child process (don't wait for it)
+	if err := cmd.Process.Release(); err != nil {
+		return fmt.Errorf("failed to release child process: %w", err)
+	}
+
+	// Print success message to parent's stdout (user will see this)
+	fmt.Printf("Daemon process started in background (PID: %d)\n", childPID)
+	fmt.Printf("Use 'ps aux | grep %d' to verify it's running\n", childPID)
+
+	return nil
+}
+
 // waitForShutdown waits for shutdown signals
+// waitForShutdown waits for shutdown signals based on run mode
+// - Foreground mode: SIGINT/SIGTERM trigger immediate shutdown
+// - Daemon mode: SIGINT/SIGTERM are logged but ignored, only IPC shutdown works
 func (orch *TmuxOrchestrator) waitForShutdown() {
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
 
-	<-sigChan
-	log.Printf("Received shutdown signal")
+	switch orch.runMode {
+	case ModeForeground:
+		// Foreground mode: respond to SIGTERM/SIGINT, trigger cleanup shutdown
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Stop(sigChan)
+
+		log.Printf("[Signal Handler] Running in Foreground mode - Ctrl+C will trigger shutdown")
+
+		sig := <-sigChan
+		log.Printf("[Signal Handler] Foreground mode: received %s, triggering cleanup shutdown", sig)
+
+	case ModeDaemon:
+		// Daemon mode: ignore SIGTERM/SIGINT (or log), only respond to IPC shutdown
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Stop(sigChan)
+
+		log.Printf("[Signal Handler] Running in Daemon mode - Ctrl+C will be ignored")
+		log.Printf("[Signal Handler] Use 'tmuxcoder stop %s' to shutdown daemon", orch.sessionName)
+
+		for {
+			sig := <-sigChan
+			// Log but don't act on terminal signals in daemon mode
+			log.Printf("[Signal Handler] Daemon mode: received %s (ignored)", sig)
+			log.Printf("[Signal Handler]   → Use 'tmuxcoder stop %s' to shutdown daemon", orch.sessionName)
+
+			// Stage 1 Integration: Show connected client count if available
+			if orch.clientTracker != nil {
+				count, err := orch.clientTracker.GetConnectedClients()
+				if err == nil {
+					if count > 0 {
+						log.Printf("[Signal Handler]   → %d client(s) currently connected", count)
+					} else {
+						log.Printf("[Signal Handler]   → No clients currently connected")
+					}
+				}
+			}
+
+			// Don't return, continue waiting for proper shutdown
+			// In daemon mode, we never exit from signal handler
+		}
+
+	default:
+		log.Printf("[Signal Handler] ERROR: Unknown run mode %v, defaulting to foreground behavior", orch.runMode)
+
+		// Fallback to foreground behavior
+		signal.Notify(sigChan, syscall.SIGTERM, syscall.SIGINT)
+		defer signal.Stop(sigChan)
+
+		sig := <-sigChan
+		log.Printf("[Signal Handler] Unknown mode fallback: received %s, triggering shutdown", sig)
+	}
 }
 
 // monitorHealth monitors the health of the system
@@ -2164,6 +2304,13 @@ func main() {
 	flag.BoolVar(&forceNewSessionFlag, "force-new-session", false, "Force creation of a new tmux session, replacing any existing session")
 	flag.BoolVar(&attachOnlyFlag, "attach-only", false, "Attach to an existing tmux session and exit without reconfiguring panels")
 	flag.BoolVar(&reloadLayoutFlag, "reload-layout", false, "Reload the tmux layout without restarting panel processes")
+
+	// Stage 3: Signal handling mode flags
+	var daemonFlag bool
+	var foregroundFlag bool
+	flag.BoolVar(&daemonFlag, "daemon", false, "Run in daemon mode (Ctrl+C ignored, use IPC to shutdown)")
+	flag.BoolVar(&foregroundFlag, "foreground", false, "Run in foreground mode (Ctrl+C triggers shutdown) [default]")
+
 	flag.Parse()
 
 	if reuseSessionFlag && forceNewSessionFlag {
@@ -2185,6 +2332,22 @@ func main() {
 		log.Fatal("cannot combine --reload-layout with --attach-only")
 	}
 
+	// Stage 3: Validate and determine run mode
+	var runMode RunMode
+	if daemonFlag && foregroundFlag {
+		log.Printf("Warning: both --daemon and --foreground specified, defaulting to foreground mode")
+		runMode = ModeForeground
+	} else if daemonFlag {
+		runMode = ModeDaemon
+		log.Printf("Starting in Daemon mode (Ctrl+C will be ignored)")
+	} else {
+		// Default to foreground for backward compatibility
+		runMode = ModeForeground
+		if foregroundFlag {
+			log.Printf("Starting in Foreground mode (explicit)")
+		}
+	}
+
 	sessionOverride := false
 	if flag.NArg() > 0 {
 		sessionName = flag.Arg(0)
@@ -2192,6 +2355,40 @@ func main() {
 	} else if sessionName != "opencode" {
 		sessionOverride = true
 	}
+
+	// Stage 3.5: Daemon Detachment with Pre-Lock Check
+	// If daemon mode is enabled and not already detached, check lock and re-execute as detached process
+	if runMode == ModeDaemon && os.Getenv("OPENCODE_DAEMON_DETACHED") == "" {
+		// Pre-detachment lock check to prevent duplicate daemons
+		// This happens BEFORE detachment to avoid race conditions
+		pathMgr := paths.NewPathManager(sessionName)
+		if err := pathMgr.EnsureDirectories(); err != nil {
+			log.Fatalf("Failed to create directories: %v", err)
+		}
+
+		// Check if another instance is already running
+		if pid, running := session.CheckLock(pathMgr.PIDPath()); running {
+			fmt.Fprintf(os.Stderr, "Error: Orchestrator already running for session '%s' (PID: %d)\n", sessionName, pid)
+			fmt.Fprintf(os.Stderr, "PID file: %s\n", pathMgr.PIDPath())
+			fmt.Fprintf(os.Stderr, "\nTo stop the existing daemon:\n")
+			fmt.Fprintf(os.Stderr, "  kill -9 %d\n", pid)
+			fmt.Fprintf(os.Stderr, "Or use: tmuxcoder stop %s\n", sessionName)
+			os.Exit(1)
+		}
+
+		// Lock check passed, proceed with detachment
+		log.Printf("[Daemon] Detaching from terminal...")
+		if err := detachAsDaemon(); err != nil {
+			log.Fatalf("[Daemon] Failed to detach: %v", err)
+		}
+		// Parent process exits here - shell returns to user
+		// Child process continues below with OPENCODE_DAEMON_DETACHED=1
+		os.Exit(0)
+	}
+
+	// If we reach here, either:
+	// 1. Running in foreground mode (runMode == ModeForeground), OR
+	// 2. Already detached as daemon child (OPENCODE_DAEMON_DETACHED=1)
 
 	// Get configuration from environment
 	serverURL := os.Getenv("OPENCODE_SERVER")
@@ -2313,7 +2510,7 @@ func main() {
 	}
 
 	// Create orchestrator
-	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly, layoutCfg, reuseSessionFlag, forceNewSessionFlag, attachOnlyFlag, configPath)
+	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly, layoutCfg, reuseSessionFlag, forceNewSessionFlag, attachOnlyFlag, configPath, runMode)
 	orchestrator.lock = lock
 
 	if err := orchestrator.prepareExistingSession(); err != nil {
