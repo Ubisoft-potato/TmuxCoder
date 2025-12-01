@@ -516,7 +516,8 @@ func (server *SocketServer) handleOrchestratorCommand(clientConn *ClientConnecti
 	}
 
 	var payload struct {
-		Command string `json:"command"`
+		Command string                 `json:"command"`
+		Params  map[string]interface{} `json:"params"`
 	}
 	if err := mapToStruct(message.Data, &payload); err != nil || strings.TrimSpace(payload.Command) == "" {
 		server.sendErrorMessage(clientConn, "orchestrator_command_response", "invalid command payload", message.RequestID)
@@ -530,6 +531,44 @@ func (server *SocketServer) handleOrchestratorCommand(clientConn *ClientConnecti
 			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
 			return
 		}
+
+	case "shutdown", "shutdown:cleanup":
+		// Extract cleanup parameter from command suffix or params
+		cleanup := false
+		if strings.HasSuffix(strings.ToLower(payload.Command), ":cleanup") {
+			cleanup = true
+		} else if payload.Params != nil {
+			if c, ok := payload.Params["cleanup"].(bool); ok {
+				cleanup = c
+			}
+		}
+
+		log.Printf("Shutdown command received (cleanup=%v)", cleanup)
+
+		// Send success response before shutting down
+		response := IPCMessage{
+			Type:      "orchestrator_command_response",
+			RequestID: message.RequestID,
+			Data: map[string]interface{}{
+				"success": true,
+				"command": "shutdown",
+				"cleanup": cleanup,
+			},
+			Timestamp: time.Now(),
+		}
+		if err := clientConn.send(response); err != nil {
+			log.Printf("Failed to send shutdown response: %v", err)
+		}
+
+		// Trigger shutdown asynchronously to allow response to be sent
+		go func() {
+			time.Sleep(100 * time.Millisecond) // Give time for response to be sent
+			if err := server.control.Shutdown(cleanup); err != nil {
+				log.Printf("Shutdown command failed: %v", err)
+			}
+		}()
+		return
+
 	default:
 		server.sendErrorMessage(clientConn, "orchestrator_command_response", "unsupported command", message.RequestID)
 		return

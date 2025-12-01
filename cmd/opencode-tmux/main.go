@@ -21,6 +21,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/opencode/tmux_coder/cmd/opencode-tmux/commands"
 	"github.com/opencode/tmux_coder/internal/client"
 	tmuxconfig "github.com/opencode/tmux_coder/internal/config"
 	"github.com/opencode/tmux_coder/internal/ipc"
@@ -92,6 +93,9 @@ type TmuxOrchestrator struct {
 
 	// Stage 3: Signal Handling
 	runMode RunMode // Default: ModeForeground for backward compatibility
+
+	// Stage 4: Shutdown control
+	cleanupOnExit bool // Whether to destroy tmux session on shutdown
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
@@ -159,11 +163,16 @@ func (orch *TmuxOrchestrator) Initialize() error {
 	)
 	log.Printf("[Stage 1] Client tracker initialized (monitoring not started)")
 
-	// Start API request handler for TUI control
-	go orch.startAPIRequestHandler()
+	// Start API request handler and SSE client only if httpClient is available
+	if orch.httpClient != nil {
+		// Start API request handler for TUI control
+		go orch.startAPIRequestHandler()
 
-	// Start SSE client for real-time updates
-	go orch.startSSEClient()
+		// Start SSE client for real-time updates
+		go orch.startSSEClient()
+	} else {
+		log.Printf("Server-only mode or HTTP client unavailable; skipping API handler and SSE client startup")
+	}
 
 	log.Printf("Tmux orchestrator initialized successfully")
 	return nil
@@ -172,6 +181,12 @@ func (orch *TmuxOrchestrator) Initialize() error {
 // Start creates and configures the tmux session with panels
 func (orch *TmuxOrchestrator) Start() error {
 	log.Printf("Starting tmux session: %s", orch.sessionName)
+
+	// In server-only mode, don't manage tmux session
+	if orch.serverOnly {
+		log.Printf("Server-only mode: skipping tmux session management")
+		return nil
+	}
 
 	orch.panes = map[string]string{}
 
@@ -268,11 +283,16 @@ func (orch *TmuxOrchestrator) Stop() error {
 	}
 
 	// ===== PHASE 5: Handle tmux session =====
-	// NOTE: In Stage 2, we always kill the session (backward compatible)
-	// In later stages, this will check a cleanup flag
-	log.Printf("[Shutdown] Cleaning up tmux session...")
-	if err := orch.killTmuxSession(); err != nil {
-		log.Printf("[Shutdown] WARNING: Failed to kill tmux session: %v", err)
+	// Stage 4: Check cleanup flag
+	if orch.cleanupOnExit {
+		log.Printf("[Shutdown] Cleaning up tmux session (cleanup=true)...")
+		if err := orch.killTmuxSession(); err != nil {
+			log.Printf("[Shutdown] WARNING: Failed to kill tmux session: %v", err)
+		}
+	} else {
+		log.Printf("[Shutdown] Preserving tmux session (cleanup=false)")
+		log.Printf("[Shutdown] Session '%s' remains available", orch.sessionName)
+		log.Printf("[Shutdown] WARNING: Panel processes are no longer supervised")
 	}
 
 	// ===== PHASE 6: Cleanup socket file (enhanced) =====
@@ -708,7 +728,7 @@ func (orch *TmuxOrchestrator) sessionExists() bool {
 func (orch *TmuxOrchestrator) resetTmuxWindow() error {
 	target := fmt.Sprintf("%s:0", orch.sessionName)
 
-	// Capture the current window id so we can remove it after creating a replacement.
+	// Capture the current window id so we can remove it before creating a replacement.
 	currentWindowID, err := orch.getWindowID(target)
 	if err != nil {
 		log.Printf("Warning: failed to resolve current window id for %s: %v", target, err)
@@ -726,18 +746,19 @@ func (orch *TmuxOrchestrator) resetTmuxWindow() error {
 		return fmt.Errorf("tmux did not return a window id for the replacement window")
 	}
 
-	// Move the replacement to index 0 so the rest of the code can target session:0 as usual.
-	moveCmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "move-window", "-s", newWindowID, "-t", target)
-	if err := moveCmd.Run(); err != nil {
-		return fmt.Errorf("failed to move replacement window to %s: %w", target, err)
-	}
-
-	// Remove the previous window if we captured it successfully.
+	// Remove the previous window BEFORE moving, to avoid index conflict.
+	// This must happen before move-window because tmux can't move to an occupied index.
 	if currentWindowID != "" {
 		killCmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "kill-window", "-t", currentWindowID)
 		if err := killCmd.Run(); err != nil {
 			log.Printf("Warning: failed to remove previous window %s: %v", currentWindowID, err)
 		}
+	}
+
+	// Move the replacement to index 0 so the rest of the code can target session:0 as usual.
+	moveCmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "move-window", "-s", newWindowID, "-t", target)
+	if err := moveCmd.Run(); err != nil {
+		return fmt.Errorf("failed to move replacement window to %s: %w", target, err)
 	}
 
 	// Ensure attached clients land on the refreshed window.
@@ -819,7 +840,11 @@ func (orch *TmuxOrchestrator) configureDefaultPanels() error {
 }
 
 func (orch *TmuxOrchestrator) prepareExistingSession() error {
+	log.Printf("[prepareExistingSession] serverOnly=%v, reuseExisting=%v, forceNewSession=%v",
+		orch.serverOnly, orch.reuseExisting, orch.forceNewSession)
+
 	if orch.serverOnly {
+		log.Printf("[prepareExistingSession] Server-only mode, skipping session preparation")
 		return nil
 	}
 
@@ -828,6 +853,9 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 	if orch.attachOnly {
 		if !sessionExists {
 			return fmt.Errorf("cannot attach: tmux session %s does not exist", orch.sessionName)
+		}
+		if err := orch.ensureDaemonRunningForAttach(); err != nil {
+			return err
 		}
 		return nil
 	}
@@ -876,6 +904,11 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 			}
 			return nil
 		case "a", "attach":
+			if err := orch.ensureDaemonRunningForAttach(); err != nil {
+				fmt.Printf("%s\n", err.Error())
+				fmt.Printf("Choose another action: [r] Reuse / [n] Create new / [q] Exit: ")
+				continue
+			}
 			orch.attachOnly = true
 			return nil
 		case "q", "quit":
@@ -884,6 +917,18 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 			fmt.Printf("Invalid input, please enter r / n / a / q: ")
 		}
 	}
+}
+
+func (orch *TmuxOrchestrator) ensureDaemonRunningForAttach() error {
+	status, err := socket.CheckSocketStatus(orch.socketPath)
+	if err != nil && status != socket.SocketNonExistent && status != socket.SocketStale {
+		return fmt.Errorf("failed to check orchestrator socket: %w", err)
+	}
+
+	if status != socket.SocketActive {
+		return fmt.Errorf("cannot attach-only: orchestrator daemon is not running (socket: %s)\nUse 'opencode-tmux start %s --reuse' to restart it.", orch.socketPath, orch.sessionName)
+	}
+	return nil
 }
 
 func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
@@ -1657,24 +1702,28 @@ func (orch *TmuxOrchestrator) getBinaryPath(appName string) (string, error) {
 		return "", fmt.Errorf("failed to get executable path: %w", err)
 	}
 
-	// Get the cmd directory (parent of opencode-tmux)
 	execDir := filepath.Dir(execPath)
-	cmdDir := filepath.Dir(execDir)
-	if filepath.Base(execDir) == "dist" {
-		cmdDir = filepath.Dir(cmdDir)
-	}
+	repoRoot := locateRepoRoot(execDir)
 
-	// Map app names to their binary paths
 	var binaryName string
-	switch appName {
-	case "opencode-sessions":
-		binaryName = filepath.Join(cmdDir, "opencode-sessions", "dist", "sessions-pane")
-	case "opencode-messages":
-		binaryName = filepath.Join(cmdDir, "opencode-messages", "dist", "messages-pane")
-	case "opencode-input":
-		binaryName = filepath.Join(cmdDir, "opencode-input", "dist", "input-pane")
-	default:
-		return "", fmt.Errorf("unknown app name: %s", appName)
+
+	if repoRoot != "" {
+		cmdDir := filepath.Join(repoRoot, "cmd")
+
+		switch appName {
+		case "opencode-sessions":
+			binaryName = filepath.Join(cmdDir, "opencode-sessions", "dist", "sessions-pane")
+		case "opencode-messages":
+			binaryName = filepath.Join(cmdDir, "opencode-messages", "dist", "messages-pane")
+		case "opencode-input":
+			binaryName = filepath.Join(cmdDir, "opencode-input", "dist", "input-pane")
+		default:
+			return "", fmt.Errorf("unknown app name: %s", appName)
+		}
+	} else {
+		// Repo root could not be detected – fall back to legacy behavior and expect
+		// binaries to be discoverable via PATH (handled by caller).
+		return "", fmt.Errorf("repository root not found for %s binary", appName)
 	}
 
 	// Check if binary exists
@@ -1684,6 +1733,41 @@ func (orch *TmuxOrchestrator) getBinaryPath(appName string) (string, error) {
 
 	log.Printf("[DEBUG] Resolved binary path for %s: %s", appName, binaryName)
 	return binaryName, nil
+}
+
+func locateRepoRoot(startDir string) string {
+	dir := startDir
+	for {
+		if dir == "" || dir == "/" || dir == "." {
+			break
+		}
+
+		if hasPanelDirs(dir) {
+			return dir
+		}
+
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return ""
+}
+
+func hasPanelDirs(root string) bool {
+	required := []string{
+		filepath.Join(root, "cmd", "opencode-sessions"),
+		filepath.Join(root, "cmd", "opencode-messages"),
+		filepath.Join(root, "cmd", "opencode-input"),
+	}
+	for _, dir := range required {
+		info, err := os.Stat(dir)
+		if err != nil || !info.IsDir() {
+			return false
+		}
+	}
+	return true
 }
 
 // verifyPanelsRunning checks if panel applications are running
@@ -1907,6 +1991,22 @@ func (orch *TmuxOrchestrator) startMissingPanels(layoutCfg *tmuxconfig.Layout, p
 	return nil
 }
 
+// Shutdown implements the interfaces.OrchestratorControl interface.
+// It triggers graceful shutdown of the orchestrator daemon.
+// If cleanup is true, the tmux session will also be destroyed.
+func (orch *TmuxOrchestrator) Shutdown(cleanup bool) error {
+	log.Printf("Shutdown requested via IPC (cleanup=%v)", cleanup)
+
+	// Store cleanup flag for use in Stop()
+	orch.cleanupOnExit = cleanup
+
+	// Trigger shutdown by canceling context
+	// This will cause waitForShutdown() to return
+	orch.cancel()
+
+	return nil
+}
+
 // sendReloadLayoutCommand connects to the running orchestrator and requests a layout reload.
 func sendReloadLayoutCommand(socketPath, sessionName string) error {
 	socketPath = strings.TrimSpace(socketPath)
@@ -1988,7 +2088,7 @@ func detachAsDaemon() error {
 
 	// Configure process attributes for detachment
 	cmd.SysProcAttr = &syscall.SysProcAttr{
-		Setsid: true,  // Create new session, detach from controlling terminal
+		Setsid: true, // Create new session, detach from controlling terminal
 	}
 
 	// Redirect stdin to /dev/null
@@ -1996,11 +2096,39 @@ func detachAsDaemon() error {
 	if err != nil {
 		return fmt.Errorf("failed to open /dev/null for stdin: %w", err)
 	}
-	defer devNull.Close()
-
 	cmd.Stdin = devNull
-	cmd.Stdout = devNull
-	cmd.Stderr = devNull
+
+	// Redirect stdout/stderr to log file for daemon process
+	// Extract session name from arguments to create session-specific log
+	sessionName := "opencode" // default
+	for i, arg := range os.Args {
+		if i > 0 && !strings.HasPrefix(arg, "-") && arg != "start" {
+			sessionName = arg
+			break
+		}
+	}
+
+	pathMgr := paths.NewPathManager(sessionName)
+	if err := pathMgr.EnsureDirectories(); err != nil {
+		return fmt.Errorf("failed to create log directory: %w", err)
+	}
+
+	var logFile *os.File
+	var logPath string
+	logPath = pathMgr.LogPath()
+	logFile, err = os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	if err != nil {
+		// If we can't open log file, fall back to /dev/null
+		// This ensures daemon can still start even if log directory is not writable
+		log.Printf("Warning: failed to open log file %s: %v (falling back to /dev/null)", logPath, err)
+		cmd.Stdout = devNull
+		cmd.Stderr = devNull
+	} else {
+		cmd.Stdout = logFile
+		cmd.Stderr = logFile
+		// Don't close logFile - let child process inherit it
+		// Parent will exit and the FD will remain open for the child
+	}
 
 	// Start the detached child process
 	if err := cmd.Start(); err != nil {
@@ -2016,6 +2144,9 @@ func detachAsDaemon() error {
 
 	// Print success message to parent's stdout (user will see this)
 	fmt.Printf("Daemon process started in background (PID: %d)\n", childPID)
+	if logFile != nil {
+		fmt.Printf("Logs: %s\n", logPath)
+	}
 	fmt.Printf("Use 'ps aux | grep %d' to verify it's running\n", childPID)
 
 	return nil
@@ -2036,8 +2167,13 @@ func (orch *TmuxOrchestrator) waitForShutdown() {
 
 		log.Printf("[Signal Handler] Running in Foreground mode - Ctrl+C will trigger shutdown")
 
-		sig := <-sigChan
-		log.Printf("[Signal Handler] Foreground mode: received %s, triggering cleanup shutdown", sig)
+		select {
+		case <-orch.ctx.Done():
+			// IPC shutdown request received via context cancellation
+			log.Printf("[Signal Handler] Foreground mode: shutdown requested via IPC")
+		case sig := <-sigChan:
+			log.Printf("[Signal Handler] Foreground mode: received %s, triggering cleanup shutdown", sig)
+		}
 
 	case ModeDaemon:
 		// Daemon mode: ignore SIGTERM/SIGINT (or log), only respond to IPC shutdown
@@ -2048,25 +2184,29 @@ func (orch *TmuxOrchestrator) waitForShutdown() {
 		log.Printf("[Signal Handler] Use 'tmuxcoder stop %s' to shutdown daemon", orch.sessionName)
 
 		for {
-			sig := <-sigChan
-			// Log but don't act on terminal signals in daemon mode
-			log.Printf("[Signal Handler] Daemon mode: received %s (ignored)", sig)
-			log.Printf("[Signal Handler]   → Use 'tmuxcoder stop %s' to shutdown daemon", orch.sessionName)
+			select {
+			case <-orch.ctx.Done():
+				// IPC shutdown request received via context cancellation
+				log.Printf("[Signal Handler] Daemon mode: shutdown requested via IPC")
+				return
 
-			// Stage 1 Integration: Show connected client count if available
-			if orch.clientTracker != nil {
-				count, err := orch.clientTracker.GetConnectedClients()
-				if err == nil {
-					if count > 0 {
-						log.Printf("[Signal Handler]   → %d client(s) currently connected", count)
-					} else {
-						log.Printf("[Signal Handler]   → No clients currently connected")
+			case sig := <-sigChan:
+				// Log but don't act on terminal signals in daemon mode
+				log.Printf("[Signal Handler] Daemon mode: received %s (ignored)", sig)
+				log.Printf("[Signal Handler]   → Use 'tmuxcoder stop %s' to shutdown daemon", orch.sessionName)
+
+				// Stage 1 Integration: Show connected client count if available
+				if orch.clientTracker != nil {
+					count, err := orch.clientTracker.GetConnectedClients()
+					if err == nil {
+						if count > 0 {
+							log.Printf("[Signal Handler]   → %d client(s) currently connected", count)
+						} else {
+							log.Printf("[Signal Handler]   → No clients currently connected")
+						}
 					}
 				}
 			}
-
-			// Don't return, continue waiting for proper shutdown
-			// In daemon mode, we never exit from signal handler
 		}
 
 	default:
@@ -2083,8 +2223,11 @@ func (orch *TmuxOrchestrator) waitForShutdown() {
 
 // monitorHealth monitors the health of the system
 func (orch *TmuxOrchestrator) monitorHealth() {
-	// Start tmux session watcher in background
-	go orch.watchTmuxSession()
+	// In server-only mode, don't monitor tmux session
+	if !orch.serverOnly {
+		// Start tmux session watcher in background
+		go orch.watchTmuxSession()
+	}
 
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()
@@ -2134,8 +2277,8 @@ func (orch *TmuxOrchestrator) performHealthCheck() {
 		log.Printf("Warning: IPC server is not running")
 	}
 
-	// Check tmux session - exit if tmux session is gone
-	if orch.isRunning && !orch.isTmuxSessionRunning() {
+	// Check tmux session - exit if tmux session is gone (skip in server-only mode)
+	if !orch.serverOnly && orch.isRunning && !orch.isTmuxSessionRunning() {
 		log.Printf("Tmux session '%s' no longer exists, shutting down orchestrator", orch.sessionName)
 		orch.cancel() // Trigger graceful shutdown
 	}
@@ -2262,7 +2405,8 @@ func sanitizeLogComponent(name string) string {
 	return builder.String()
 }
 
-func main() {
+// runLegacyMode runs the original main function logic (backward compatibility)
+func runLegacyMode() {
 	// Configure logging to file
 	logFileHomeDir, err := os.UserHomeDir()
 	if err != nil {
@@ -2284,13 +2428,12 @@ func main() {
 	// name will remain as started, which is acceptable.
 
 	logPath := filepath.Join(logDir, fmt.Sprintf("tmux-%s.log", sanitizeLogComponent(sessionName)))
-	logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
-	if err != nil {
-		log.Fatalf("Failed to open log file: %v", err)
-	} else {
+	if logFile, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644); err == nil {
 		log.SetOutput(logFile)
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 		defer logFile.Close()
+	} else {
+		fmt.Fprintf(os.Stderr, "Warning: failed to open log file %s: %v (continuing with stderr logging)\n", logPath, err)
 	}
 
 	// Parse command line arguments
@@ -2390,9 +2533,22 @@ func main() {
 	// 1. Running in foreground mode (runMode == ModeForeground), OR
 	// 2. Already detached as daemon child (OPENCODE_DAEMON_DETACHED=1)
 
+	// If this is the detached daemon child, redirect log output to file
+	if runMode == ModeDaemon && os.Getenv("OPENCODE_DAEMON_DETACHED") == "1" {
+		pathMgr := paths.NewPathManager(sessionName)
+		logPath := pathMgr.LogPath()
+		logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+		if err == nil {
+			log.SetOutput(logFile)
+			log.Printf("=== Daemon process started (PID: %d) ===", os.Getpid())
+		} else {
+			log.Printf("Warning: failed to open log file %s: %v", logPath, err)
+		}
+	}
+
 	// Get configuration from environment
 	serverURL := os.Getenv("OPENCODE_SERVER")
-	if serverURL == "" {
+	if serverURL == "" && !serverOnly {
 		log.Fatal("OPENCODE_SERVER environment variable not set")
 	}
 
@@ -2498,8 +2654,11 @@ func main() {
 		}
 	}
 
-	// Create HTTP client
-	httpClient := opencode.NewClient(option.WithBaseURL(serverURL))
+	// Create HTTP client (only if not in server-only mode)
+	var httpClient *opencode.Client
+	if !serverOnly {
+		httpClient = opencode.NewClient(option.WithBaseURL(serverURL))
+	}
 
 	// Initialize theme
 	if err := theme.LoadThemesFromJSON(); err != nil {
@@ -2567,6 +2726,168 @@ func main() {
 	if err := orchestrator.Stop(); err != nil {
 		log.Printf("Error during shutdown: %v", err)
 	}
+}
+
+// main is the entry point that dispatches to subcommands or legacy mode
+func main() {
+	// Check if subcommand is used
+	if len(os.Args) >= 2 {
+		subcommand := os.Args[1]
+		knownCommands := []string{"start", "attach", "detach", "stop", "status", "list", "help", "version"}
+
+		// Check if first argument is a known subcommand
+		if contains(knownCommands, subcommand) {
+			executeSubcommand(subcommand, os.Args[2:])
+			return
+		}
+	}
+
+	// Backward compatibility: run legacy mode if no subcommand
+	runLegacyMode()
+}
+
+// contains checks if a string is in a slice
+func contains(slice []string, item string) bool {
+	for _, s := range slice {
+		if s == item {
+			return true
+		}
+	}
+	return false
+}
+
+// executeSubcommand dispatches to the appropriate subcommand handler
+func executeSubcommand(subcommand string, args []string) {
+	// Import commands package functions
+	var err error
+
+	switch subcommand {
+	case "start":
+		runLegacyModeWithArgs(translateStartArgs(args))
+		return
+
+	case "attach":
+		err = commands.CmdAttach(args)
+
+	case "detach":
+		err = commands.CmdDetach(args)
+
+	case "stop":
+		err = commands.CmdStop(args)
+
+	case "status":
+		err = commands.CmdStatus(args)
+
+	case "list":
+		err = commands.CmdList(args)
+
+	case "help":
+		printHelp()
+
+	case "version":
+		printVersion()
+
+	default:
+		fmt.Fprintf(os.Stderr, "Unknown command: %s\n", subcommand)
+		fmt.Fprintf(os.Stderr, "Run 'opencode-tmux help' for usage.\n")
+		os.Exit(1)
+	}
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// translateStartArgs maps new CLI flag aliases to the legacy flags that
+// runLegacyMode expects (e.g. --reuse -> --reuse-session).
+func translateStartArgs(args []string) []string {
+	if len(args) == 0 {
+		return args
+	}
+	flags := make([]string, 0, len(args))
+	positionals := make([]string, 0, 1)
+	trailing := []string{}
+	mapped := func(arg string) string {
+		switch arg {
+		case "--reuse":
+			return "--reuse-session"
+		case "--force", "--force-new":
+			return "--force-new-session"
+		default:
+			return arg
+		}
+	}
+
+	for idx := 0; idx < len(args); idx++ {
+		arg := args[idx]
+		if arg == "--" {
+			trailing = append(trailing, args[idx:]...)
+			break
+		}
+		if strings.HasPrefix(arg, "-") && arg != "-" {
+			flags = append(flags, mapped(arg))
+			continue
+		}
+		positionals = append(positionals, arg)
+	}
+
+	result := make([]string, 0, len(args))
+	result = append(result, flags...)
+	result = append(result, positionals...)
+	result = append(result, trailing...)
+	return result
+}
+
+// runLegacyModeWithArgs re-runs the legacy starter after re-writing os.Args
+// so that the "start" subcommand token is transparent to the legacy parser.
+func runLegacyModeWithArgs(args []string) {
+	originalArgs := os.Args
+	newArgs := append([]string{os.Args[0]}, args...)
+	os.Args = newArgs
+	defer func() {
+		os.Args = originalArgs
+	}()
+
+	runLegacyMode()
+}
+
+// printHelp shows usage information
+func printHelp() {
+	fmt.Println("OpenCode Tmux Orchestrator - Manage collaborative tmux sessions")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  opencode-tmux <command> [options] [session-name]")
+	fmt.Println()
+	fmt.Println("Commands:")
+	fmt.Println("  start      Start orchestrator daemon and tmux session")
+	fmt.Println("  attach     Connect to existing tmux session")
+	fmt.Println("  detach     Disconnect from current session (daemon continues)")
+	fmt.Println("  stop       Stop orchestrator daemon")
+	fmt.Println("  status     View session status")
+	fmt.Println("  list       List all running sessions")
+	fmt.Println("  help       Show this help message")
+	fmt.Println("  version    Show version information")
+	fmt.Println()
+	fmt.Println("Legacy Usage (backward compatible):")
+	fmt.Println("  opencode-tmux [options] [session-name]")
+	fmt.Println()
+	fmt.Println("Examples:")
+	fmt.Println("  opencode-tmux start mysession")
+	fmt.Println("  opencode-tmux start mysession --server-only --daemon")
+	fmt.Println("  opencode-tmux attach mysession")
+	fmt.Println("  opencode-tmux stop mysession --cleanup")
+	fmt.Println("  opencode-tmux status mysession")
+	fmt.Println()
+	fmt.Println("For more information on a specific command:")
+	fmt.Println("  opencode-tmux <command> --help")
+}
+
+// printVersion shows version information
+func printVersion() {
+	fmt.Println("OpenCode Tmux Orchestrator")
+	fmt.Println("Version: 2.0.0-stage4")
+	fmt.Println("Build: Stage 4 - CLI Subcommands")
 }
 
 // startSSEClient starts the Server-Sent Events client for real-time updates
@@ -3013,6 +3334,10 @@ func mergeStreamingText(current, incoming string) string {
 // loadSessionsFromServer syncs local sessions with OpenCode server
 // Only syncs sessions that already exist in local state (for session isolation in multi-orchestrator architecture)
 func (orch *TmuxOrchestrator) loadSessionsFromServer() error {
+	if orch.httpClient == nil {
+		log.Printf("HTTP client unavailable; skipping session sync")
+		return nil
+	}
 	log.Printf("Syncing sessions with OpenCode server...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
