@@ -57,14 +57,14 @@ func CmdStatus(args []string) error {
 	if *jsonOutput {
 		// JSON output
 		output := map[string]interface{}{
-			"session_name":    sessionName,
-			"status":          overallStatus,
-			"tmux_running":    status.TmuxRunning,
-			"daemon_running":  status.DaemonRunning,
-			"client_count":    status.ClientCount,
-			"clients":         clients,
-			"socket_path":     socketPath,
-			"pid_path":        pidPath,
+			"session_name":   sessionName,
+			"status":         overallStatus,
+			"tmux_running":   status.TmuxRunning,
+			"daemon_running": status.DaemonRunning,
+			"client_count":   status.ClientCount,
+			"clients":        clients,
+			"socket_path":    socketPath,
+			"pid_path":       pidPath,
 		}
 
 		encoder := json.NewEncoder(os.Stdout)

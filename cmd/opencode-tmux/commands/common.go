@@ -1,10 +1,12 @@
 package commands
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -149,6 +151,30 @@ func getConnectedClients(sessionName string) ([]ClientInfo, error) {
 	}
 
 	return clients, nil
+}
+
+// formatDuration converts a Unix timestamp to a human-readable duration string
+// The timestamp is expected to be from tmux's client_created format
+func formatDuration(timestamp string) string {
+	// Parse Unix timestamp
+	seconds, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return "unknown"
+	}
+
+	// Calculate duration since connection
+	connectedAt := time.Unix(seconds, 0)
+	duration := time.Since(connectedAt)
+
+	// Format as human-readable duration
+	if duration < time.Minute {
+		return fmt.Sprintf("%ds", int(duration.Seconds()))
+	} else if duration < time.Hour {
+		return fmt.Sprintf("%dm", int(duration.Minutes()))
+	} else if duration < 24*time.Hour {
+		return fmt.Sprintf("%dh", int(duration.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(duration.Hours()/24))
 }
 
 // ensureOpenCodeDir creates opencode-tmux directory if not exists

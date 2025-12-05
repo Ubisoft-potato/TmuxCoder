@@ -36,17 +36,17 @@ type SocketServer struct {
 
 // ClientConnection represents a connected panel client
 type ClientConnection struct {
-	ID           string                    `json:"id"`
-	PanelType    string                    `json:"panel_type"`
-	PanelID      string                    `json:"panel_id"`
-	Conn         net.Conn                  `json:"-"`
-	ConnectedAt  time.Time                 `json:"connected_at"`
-	LastSeen     time.Time                 `json:"last_seen"`
-	MessageCount int64                     `json:"message_count"`
-	Requester    *interfaces.IpcRequester  `json:"requester,omitempty"` // Client credentials
-	encoder      *json.Encoder             `json:"-"`
-	decoder      *json.Decoder             `json:"-"`
-	sendMutex    sync.Mutex                // To synchronize writes to the connection
+	ID           string                   `json:"id"`
+	PanelType    string                   `json:"panel_type"`
+	PanelID      string                   `json:"panel_id"`
+	Conn         net.Conn                 `json:"-"`
+	ConnectedAt  time.Time                `json:"connected_at"`
+	LastSeen     time.Time                `json:"last_seen"`
+	MessageCount int64                    `json:"message_count"`
+	Requester    *interfaces.IpcRequester `json:"requester,omitempty"` // Client credentials
+	encoder      *json.Encoder            `json:"-"`
+	decoder      *json.Decoder            `json:"-"`
+	sendMutex    sync.Mutex               // To synchronize writes to the connection
 }
 
 // send safely writes a message to the client connection.

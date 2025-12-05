@@ -178,9 +178,9 @@ func (ct *ClientTracker) GetLastError() error {
 
 // HasClients returns true if there are any connected clients (based on last check)
 func (ct *ClientTracker) HasClients() bool {
-    ct.mu.RLock()
-    defer ct.mu.RUnlock()
-    return ct.clientCount > 0
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
+	return ct.clientCount > 0
 }
 
 func (ct *ClientTracker) SessionName() string { return ct.sessionName }
@@ -190,22 +190,22 @@ func (ct *ClientTracker) TmuxCommand() string { return ct.tmuxCommand }
 func (ct *ClientTracker) CheckInterval() time.Duration { return ct.checkInterval }
 
 func (ct *ClientTracker) SetTestingState(count int, lastCheck time.Time, err error) {
-    ct.mu.Lock()
-    ct.clientCount = count
-    ct.lastCheck = lastCheck
-    ct.lastError = err
-    ct.mu.Unlock()
+	ct.mu.Lock()
+	ct.clientCount = count
+	ct.lastCheck = lastCheck
+	ct.lastError = err
+	ct.mu.Unlock()
 }
 
 // String returns a human-readable representation of the tracker state
 func (ct *ClientTracker) String() string {
-    ct.mu.RLock()
-    defer ct.mu.RUnlock()
+	ct.mu.RLock()
+	defer ct.mu.RUnlock()
 
-    if ct.lastError != nil {
-        return fmt.Sprintf("ClientTracker[session=%s, last_error=%v]", ct.sessionName, ct.lastError)
-    }
+	if ct.lastError != nil {
+		return fmt.Sprintf("ClientTracker[session=%s, last_error=%v]", ct.sessionName, ct.lastError)
+	}
 
-    return fmt.Sprintf("ClientTracker[session=%s, clients=%d, last_check=%v]",
-        ct.sessionName, ct.clientCount, ct.lastCheck.Format(time.RFC3339))
+	return fmt.Sprintf("ClientTracker[session=%s, clients=%d, last_check=%v]",
+		ct.sessionName, ct.clientCount, ct.lastCheck.Format(time.RFC3339))
 }

@@ -39,7 +39,7 @@ func CmdStop(args []string) error {
 		return fmt.Errorf("orchestrator daemon is not running for session '%s'\nSocket: %s", sessionName, socketPath)
 	}
 
-	// Check client connections if requested
+	// Stage 6: Enhanced client connection check
 	if *checkClients && !*force {
 		clients, err := getConnectedClients(sessionName)
 		if err == nil && len(clients) > 0 {
@@ -47,8 +47,14 @@ func CmdStop(args []string) error {
 			fmt.Fprintf(os.Stderr, "Use --force to stop anyway, or ask other users to detach first.\n\n")
 			fmt.Fprintf(os.Stderr, "Connected clients:\n")
 			for _, client := range clients {
-				fmt.Fprintf(os.Stderr, "  - %s (PID %s)\n", client.TTY, client.PID)
+				duration := formatDuration(client.ConnectedAt)
+				fmt.Fprintf(os.Stderr, "  - %s (PID %s, connected %s ago)\n",
+					client.TTY, client.PID, duration)
 			}
+			fmt.Fprintf(os.Stderr, "\nSuggested actions:\n")
+			fmt.Fprintf(os.Stderr, "  → Use --force to stop despite connections\n")
+			fmt.Fprintf(os.Stderr, "  → Ask clients to detach first\n")
+			fmt.Fprintf(os.Stderr, "  → Stop without --cleanup to preserve session\n")
 			return fmt.Errorf("clients still connected")
 		}
 	}

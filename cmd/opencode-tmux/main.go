@@ -23,6 +23,7 @@ import (
 
 	"github.com/opencode/tmux_coder/cmd/opencode-tmux/commands"
 	"github.com/opencode/tmux_coder/internal/client"
+	appconfig "github.com/opencode/tmux_coder/internal/config"
 	tmuxconfig "github.com/opencode/tmux_coder/internal/config"
 	"github.com/opencode/tmux_coder/internal/interfaces"
 	"github.com/opencode/tmux_coder/internal/ipc"
@@ -33,6 +34,7 @@ import (
 	"github.com/opencode/tmux_coder/internal/session"
 	"github.com/opencode/tmux_coder/internal/socket"
 	"github.com/opencode/tmux_coder/internal/state"
+	"github.com/opencode/tmux_coder/internal/supervision"
 	"github.com/opencode/tmux_coder/internal/theme"
 	"github.com/opencode/tmux_coder/internal/types"
 	"github.com/sst/opencode-sdk-go"
@@ -100,8 +102,12 @@ type TmuxOrchestrator struct {
 	cleanupOnExit bool // Whether to destroy tmux session on shutdown
 
 	// Stage 5: Status tracking
-	startedAt time.Time // When the orchestrator was started
+	startedAt time.Time               // When the orchestrator was started
 	owner     interfaces.SessionOwner // Session owner information
+
+	// Stage 6: Process monitoring and health detection
+	healthChecker *supervision.PaneHealthChecker
+	appConfig     *appconfig.Config
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
@@ -207,6 +213,34 @@ func (orch *TmuxOrchestrator) Initialize() error {
 func (orch *TmuxOrchestrator) Start() error {
 	log.Printf("Starting tmux session: %s", orch.sessionName)
 
+	// Stage 6: Load configuration
+	if orch.configPath != "" {
+		log.Printf("[Stage 6] Loading configuration from: %s", orch.configPath)
+		cfg, err := appconfig.LoadConfig(orch.configPath)
+		if err != nil {
+			log.Printf("[Stage 6] Warning: failed to load config: %v, using defaults", err)
+			orch.appConfig = appconfig.DefaultConfig()
+		} else {
+			if err := cfg.Validate(); err != nil {
+				log.Printf("[Stage 6] Warning: invalid config: %v, using defaults", err)
+				orch.appConfig = appconfig.DefaultConfig()
+			} else {
+				orch.appConfig = cfg
+				log.Printf("[Stage 6] Configuration loaded successfully")
+			}
+		}
+	} else {
+		orch.appConfig = appconfig.DefaultConfig()
+		log.Printf("[Stage 6] Using default configuration")
+	}
+
+	// Stage 6: Initialize health checker
+	orch.healthChecker = supervision.NewPaneHealthChecker(
+		orch.tmuxCommand,
+		orch.sessionName,
+	)
+	log.Printf("[Stage 6] Health checker initialized")
+
 	// In server-only mode, don't manage tmux session
 	if orch.serverOnly {
 		log.Printf("Server-only mode: skipping tmux session management")
@@ -257,6 +291,15 @@ func (orch *TmuxOrchestrator) Start() error {
 		// Configure panels (for new sessions or reused sessions)
 		if err := orch.configurePanels(); err != nil {
 			return fmt.Errorf("failed to configure panels: %w", err)
+		}
+
+		// Stage 6: Recover existing session health if reusing
+		if orch.reuseExisting && sessionExists {
+			log.Printf("[Stage 6] Recovering existing session health...")
+			if err := orch.recoverExistingSession(); err != nil {
+				log.Printf("[Stage 6] Warning: session recovery encountered issues: %v", err)
+				// Don't fail startup on recovery issues
+			}
 		}
 
 		// Start panel applications
@@ -318,6 +361,10 @@ func (orch *TmuxOrchestrator) Stop() error {
 		log.Printf("[Shutdown] Preserving tmux session (cleanup=false)")
 		log.Printf("[Shutdown] Session '%s' remains available", orch.sessionName)
 		log.Printf("[Shutdown] WARNING: Panel processes are no longer supervised")
+		log.Printf("[Shutdown] To restore management: opencode-tmux start %s --reuse", orch.sessionName)
+
+		// Stage 6: Show warning in tmux status bar
+		orch.setTmuxStatusBarWarning("⚠ Daemon stopped")
 	}
 
 	// ===== PHASE 6: Cleanup socket file (enhanced) =====
@@ -1626,27 +1673,36 @@ func (orch *TmuxOrchestrator) startPaneSupervisor(paneTarget, appName string, en
 }
 
 func (orch *TmuxOrchestrator) monitorPane(ctx context.Context, paneTarget, appName string, envVars map[string]string) {
-	ticker := time.NewTicker(2 * time.Second)
+	// Stage 6: Use configured health check interval and delays
+	checkInterval := 2 * time.Second
+	initialDelay := time.Second
+	maxDelay := 30 * time.Second
+
+	if orch.appConfig != nil && orch.appConfig.Supervision.Enabled {
+		checkInterval = orch.appConfig.Supervision.HealthCheckInterval
+		initialDelay = orch.appConfig.Supervision.RestartDelay
+		maxDelay = orch.appConfig.Supervision.MaxRestartDelay
+		log.Printf("[Monitor] Using configured intervals: check=%v, restart=%v, max=%v",
+			checkInterval, initialDelay, maxDelay)
+	}
+
+	ticker := time.NewTicker(checkInterval)
 	defer ticker.Stop()
-	retryDelay := time.Second
-	const maxDelay = 30 * time.Second
+	retryDelay := initialDelay
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			alive, err := orch.isPaneAlive(paneTarget)
-			if err != nil {
-				log.Printf("[DEBUG] Failed to read pane %s status: %v", paneTarget, err)
-				continue
-			}
-			if alive {
-				retryDelay = time.Second
+			health := orch.healthChecker.CheckPaneHealth(paneTarget)
+
+			if health == supervision.PaneHealthy {
+				retryDelay = initialDelay
 				continue
 			}
 
-			log.Printf("[WARN] Pane %s for %s is not running; attempting restart", paneTarget, appName)
+			log.Printf("[WARN] Pane %s for %s unhealthy (status: %s); attempting restart", paneTarget, appName, health)
 			if err := orch.launchPaneProcess(paneTarget, appName, envVars); err != nil {
 				log.Printf("[ERROR] Failed to restart pane %s: %v", paneTarget, err)
 				time.Sleep(retryDelay)
@@ -1656,7 +1712,7 @@ func (orch *TmuxOrchestrator) monitorPane(ctx context.Context, paneTarget, appNa
 				}
 				continue
 			}
-			retryDelay = time.Second
+			retryDelay = initialDelay
 		}
 	}
 }
@@ -2868,6 +2924,128 @@ func runLegacyMode() {
 	// Cleanup
 	if err := orchestrator.Stop(); err != nil {
 		log.Printf("Error during shutdown: %v", err)
+	}
+}
+
+// Stage 6: Session recovery and health management methods
+
+// recoverExistingSession checks and recovers panes in an existing session
+// This is called when reusing a session to ensure all panes are healthy
+func (orch *TmuxOrchestrator) recoverExistingSession() error {
+	if orch.healthChecker == nil {
+		log.Printf("[Reuse] Health checker not initialized, skipping recovery")
+		return nil
+	}
+
+	log.Printf("[Reuse] Checking health of existing session: %s", orch.sessionName)
+
+	// Get all pane targets from current layout
+	orch.layoutMutex.Lock()
+	paneTargets := make([]string, 0, len(orch.panes))
+	for _, target := range orch.panes {
+		paneTargets = append(paneTargets, target)
+	}
+	orch.layoutMutex.Unlock()
+
+	if len(paneTargets) == 0 {
+		log.Printf("[Reuse] No panes to check")
+		return nil
+	}
+
+	// Check health of all panes
+	healthStatus := orch.healthChecker.CheckAllPanesHealth(paneTargets)
+
+	// Create environment checker
+	envChecker := supervision.NewEnvChecker(orch.tmuxCommand, map[string]string{
+		"OPENCODE_SOCKET": orch.socketPath,
+	})
+
+	// Process each pane based on health status
+	for paneTarget, health := range healthStatus {
+		log.Printf("[Reuse] Pane %s: %s", paneTarget, health)
+
+		switch health {
+		case supervision.PaneHealthy:
+			// Check if environment variables are stale
+			if envChecker.NeedsEnvUpdate(paneTarget) {
+				log.Printf("[Reuse] Pane %s has stale environment, will restart", paneTarget)
+				if err := orch.killPaneProcess(paneTarget); err != nil {
+					log.Printf("[Reuse] Failed to kill pane %s process: %v", paneTarget, err)
+				}
+			} else {
+				log.Printf("[Reuse] Pane %s is healthy with correct environment", paneTarget)
+			}
+
+		case supervision.PaneDead:
+			log.Printf("[Reuse] Pane %s is dead, supervisor will restart it", paneTarget)
+			// The monitor goroutine will handle restart
+
+		case supervision.PaneZombie:
+			log.Printf("[Reuse] Pane %s is zombie, killing it", paneTarget)
+			if err := orch.killZombiePane(paneTarget); err != nil {
+				log.Printf("[Reuse] Failed to kill zombie pane %s: %v", paneTarget, err)
+			}
+
+		case supervision.PaneMissing:
+			log.Printf("[Reuse] Pane %s is missing, will be recreated", paneTarget)
+			// The session configuration process will handle this
+		}
+	}
+
+	return nil
+}
+
+// killPaneProcess gracefully terminates the process in a pane
+func (orch *TmuxOrchestrator) killPaneProcess(paneTarget string) error {
+	// Send Ctrl+C to the process
+	cmd := exec.Command(orch.tmuxCommand, "send-keys", "-t", paneTarget, "C-c")
+	if err := cmd.Run(); err != nil {
+		log.Printf("[Kill] Failed to send C-c to pane %s: %v", paneTarget, err)
+	}
+
+	// Wait briefly for graceful shutdown
+	time.Sleep(500 * time.Millisecond)
+
+	// Check if process is still alive
+	alive, err := orch.isPaneAlive(paneTarget)
+	if err != nil {
+		return fmt.Errorf("failed to check pane status: %w", err)
+	}
+
+	// If still alive, force kill with respawn-pane
+	if alive {
+		log.Printf("[Kill] Process in pane %s still alive, forcing respawn", paneTarget)
+		cmd = exec.Command(orch.tmuxCommand, "respawn-pane", "-k", "-t", paneTarget, "exit 0")
+		return cmd.Run()
+	}
+
+	return nil
+}
+
+// killZombiePane forces a zombie pane to be respawned
+func (orch *TmuxOrchestrator) killZombiePane(paneTarget string) error {
+	cmd := exec.Command(orch.tmuxCommand, "respawn-pane", "-k", "-t", paneTarget, "true")
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to respawn zombie pane: %w", err)
+	}
+	log.Printf("[Kill] Zombie pane %s respawned", paneTarget)
+	return nil
+}
+
+// setTmuxStatusBarWarning displays a warning message in the tmux status bar
+func (orch *TmuxOrchestrator) setTmuxStatusBarWarning(message string) {
+	cmd := exec.Command(orch.tmuxCommand, "set", "-t", orch.sessionName,
+		"status-right", fmt.Sprintf("#[fg=yellow,bold]%s", message))
+	if err := cmd.Run(); err != nil {
+		log.Printf("[StatusBar] Failed to set warning: %v", err)
+	}
+}
+
+// clearTmuxStatusBar clears the tmux status bar warning
+func (orch *TmuxOrchestrator) clearTmuxStatusBar() {
+	cmd := exec.Command(orch.tmuxCommand, "set", "-t", orch.sessionName, "status-right", "")
+	if err := cmd.Run(); err != nil {
+		log.Printf("[StatusBar] Failed to clear status bar: %v", err)
 	}
 }
 

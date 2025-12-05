@@ -7,6 +7,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	friendlyerrors "github.com/opencode/tmux_coder/internal/errors"
 )
 
 // CmdAttach implements the 'attach' subcommand
@@ -44,7 +46,8 @@ func CmdAttach(args []string) error {
 			// Delegate to start command
 			return CmdStart([]string{sessionName, "--daemon"})
 		}
-		return fmt.Errorf("session '%s' does not exist\nAvailable options:\n  - Create new session: opencode-tmux start %s\n  - Auto-create and attach: opencode-tmux attach %s --auto-start\n  - List sessions: opencode-tmux list", sessionName, sessionName, sessionName)
+		// Return user-friendly error with hints
+		return friendlyerrors.SessionNotFound(sessionName)
 	}
 
 	// Check if daemon is running
@@ -82,7 +85,12 @@ func CmdAttach(args []string) error {
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
-	return cmd.Run()
+	if err := cmd.Run(); err != nil {
+		// Wrap with user-friendly error
+		return friendlyerrors.AttachFailed(sessionName, err)
+	}
+
+	return nil
 }
 
 // reorderAttachArgs reorders arguments so flags come before positional arguments

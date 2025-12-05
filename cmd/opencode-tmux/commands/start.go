@@ -27,17 +27,17 @@ type StartOptions struct {
 	APIKey    string
 
 	// Behavior flags
-	Detach      bool // Start daemon without attaching (renamed from ServerOnly)
-	Daemon      bool // Run in daemon mode (ignore Ctrl+C)
+	Detach        bool // Start daemon without attaching (renamed from ServerOnly)
+	Daemon        bool // Run in daemon mode (ignore Ctrl+C)
 	ReuseExisting bool // [DEPRECATED] Reuse existing tmux session (now automatic)
-	ForceNew    bool // Force kill existing and create new
-	AttachRead  bool // Attach in read-only mode
-	AttachOnly  bool // Only attach, don't configure
+	ForceNew      bool // Force kill existing and create new
+	AttachRead    bool // Attach in read-only mode
+	AttachOnly    bool // Only attach, don't configure
 
 	// Advanced options
-	NoAutoStart bool   // Don't start panels automatically
-	DetachKeys  string // Custom detach key sequence
-	ReloadLayout bool  // Reload layout without restarting
+	NoAutoStart  bool   // Don't start panels automatically
+	DetachKeys   string // Custom detach key sequence
+	ReloadLayout bool   // Reload layout without restarting
 }
 
 // CmdStart implements the 'start' subcommand
@@ -282,17 +282,40 @@ func handleExistingSession(opts *StartOptions, status SessionStatus) error {
 	return nil
 }
 
-
 // reorderArgs reorders arguments so flags come before positional arguments
 // This is necessary because Go's flag package stops parsing after the first non-flag argument
 func reorderArgs(args []string) []string {
 	flags := []string{}
 	positionals := []string{}
+	expectValue := false // Track if next arg is a flag value
 
-	for _, arg := range args {
-		if strings.HasPrefix(arg, "-") {
+	for i, arg := range args {
+		if expectValue {
+			// This is a value for the previous flag
 			flags = append(flags, arg)
+			expectValue = false
+		} else if strings.HasPrefix(arg, "-") {
+			// This is a flag
+			flags = append(flags, arg)
+
+			// Check if this flag expects a value (not a boolean flag)
+			// Boolean flags in our command: --daemon, --detach, --server-only, --reuse,
+			// --force, --read-only, --attach-only, --no-auto-start, --reload-layout
+			isBoolFlag := arg == "--daemon" || arg == "--detach" || arg == "--server-only" ||
+				arg == "--reuse" || arg == "--reuse-session" || arg == "--force" ||
+				arg == "--force-new" || arg == "--force-new-session" ||
+				arg == "--read-only" || arg == "--attach-only" ||
+				arg == "--no-auto-start" || arg == "--reload-layout"
+
+			// Check if flag has =value format
+			hasEquals := strings.Contains(arg, "=")
+
+			// If not a bool flag and not using = format, next arg is the value
+			if !isBoolFlag && !hasEquals && i+1 < len(args) {
+				expectValue = true
+			}
 		} else {
+			// This is a positional argument (session name)
 			positionals = append(positionals, arg)
 		}
 	}
