@@ -3,170 +3,152 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
+	"os/signal"
+	"syscall"
+
+	"github.com/opencode/tmux_coder/cmd/tmuxcoder/internal"
 )
 
-const version = "1.0.0"
+const version = "2.0.0"
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "version", "-v", "--version":
-			fmt.Printf("tmuxcoder v%s\n", version)
-			return
-		case "help", "-h", "--help":
-			printHelp()
-			return
-		}
-	}
+	app := internal.NewApp()
+	defer app.Close()
 
-	// Find project root - try multiple strategies
-	projectRoot := findProjectRoot()
-	if projectRoot == "" {
-		fmt.Fprintf(os.Stderr, "Error: could not find project root (looking for scripts/start.sh)\n")
-		fmt.Fprintf(os.Stderr, "\nPlease run tmuxcoder from the project directory, or set TMUXCODER_ROOT:\n")
-		fmt.Fprintf(os.Stderr, "  cd /path/to/TmuxCoder\n")
-		fmt.Fprintf(os.Stderr, "  ./tmuxcoder\n")
-		fmt.Fprintf(os.Stderr, "\nOr:\n")
-		fmt.Fprintf(os.Stderr, "  export TMUXCODER_ROOT=/path/to/TmuxCoder\n")
-		fmt.Fprintf(os.Stderr, "  tmuxcoder\n")
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		fmt.Fprintf(os.Stderr, "\nReceived %s, shutting down...\n", sig)
+		app.Close()
 		os.Exit(1)
+	}()
+
+	// Handle zero-argument case: smart start
+	if len(os.Args) == 1 {
+		if err := app.SmartStart(""); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+		return
 	}
 
-	// Path to the start script
-	startScript := filepath.Join(projectRoot, "scripts", "start.sh")
-	if _, err := os.Stat(startScript); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: start script not found at %s\n", startScript)
-		os.Exit(1)
+	// Parse command
+	cmd := os.Args[1]
+	args := []string{}
+	if len(os.Args) > 2 {
+		args = os.Args[2:]
 	}
 
-	// Prepare arguments for the start script
-	var args []string
-	if len(os.Args) > 1 {
-		args = os.Args[1:]
-	}
+	// Handle subcommands
+	switch cmd {
+	case "help", "-h", "--help":
+		printHelp()
 
-	// Execute the start script
-	cmd := exec.Command(startScript, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
+	case "version", "-v", "--version":
+		fmt.Printf("tmuxcoder v%s\n", version)
 
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		fmt.Fprintf(os.Stderr, "Error: failed to execute start script: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-// findProjectRoot tries multiple strategies to find the project root
-func findProjectRoot() string {
-	// Strategy 1: Check TMUXCODER_ROOT environment variable
-	if root := os.Getenv("TMUXCODER_ROOT"); root != "" {
-		if isProjectRoot(root) {
-			return root
-		}
-	}
-
-	// Strategy 2: Check current working directory
-	if cwd, err := os.Getwd(); err == nil {
-		if isProjectRoot(cwd) {
-			return cwd
-		}
-		// Also try searching upward from cwd
-		if root := searchUpward(cwd); root != "" {
-			return root
-		}
-	}
-
-	// Strategy 3: Try to find from executable location (for when running ./tmuxcoder)
-	if execPath, err := os.Executable(); err == nil {
-		execPath, _ = filepath.EvalSymlinks(execPath)
-		execDir := filepath.Dir(execPath)
-
-		// If running from project directory (./tmuxcoder)
-		if isProjectRoot(execDir) {
-			return execDir
+	case "list", "ls":
+		if err := app.ListSessions(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 
-		// Try searching upward from executable location
-		if root := searchUpward(execDir); root != "" {
-			return root
-		}
-	}
-
-	return ""
-}
-
-// isProjectRoot checks if a directory is the project root
-func isProjectRoot(dir string) bool {
-	scriptPath := filepath.Join(dir, "scripts", "start.sh")
-	_, err := os.Stat(scriptPath)
-	return err == nil
-}
-
-// searchUpward searches for project root by going up the directory tree
-func searchUpward(startDir string) string {
-	dir := startDir
-	for {
-		if isProjectRoot(dir) {
-			return dir
+	case "new", "start":
+		if err := app.CreateSession(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			return ""
+	case "attach", "a":
+		if err := app.AttachSession(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
-		dir = parent
+
+	case "stop", "kill":
+		if err := app.StopSession(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "status", "st":
+		if err := app.ShowStatus(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	default:
+		// If first arg looks like a session name (no dashes), treat as smart start
+		if cmd[0] != '-' {
+			if err := app.SmartStart(cmd); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// Pass through to opencode-tmux for legacy flags
+			if err := app.PassThrough(os.Args[1:]); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
 	}
 }
 
 func printHelp() {
-	help := `tmuxcoder - AI-powered coding orchestrator with tmux
+	help := `tmuxcoder - Zero-config AI coding orchestrator
 
 USAGE:
-    tmuxcoder [OPTIONS]
+    tmuxcoder [COMMAND] [OPTIONS]
 
-OPTIONS:
-    -h, --help           Show this help message
-    -v, --version        Show version information
-    --skip-build         Skip the Go build step
-    --server <URL>       Set OPENCODE_SERVER (default auto-start on 127.0.0.1:55306)
-    --attach-only        Attach to existing tmux session only
-    -- <args>            Pass additional arguments to opencode-tmux
+COMMANDS:
+    (no command)           Smart start - auto-detect session and attach
+    <session-name>         Start or attach to named session
+    new <name>             Create new session (alias: start)
+    attach <name>          Attach to existing session (alias: a)
+    stop <name>            Stop session daemon (alias: kill)
+    list                   List all sessions (alias: ls)
+    status [name]          Show session status (alias: st)
+    help                   Show this help
+    version                Show version
 
 EXAMPLES:
-    # Start tmuxcoder (from project directory)
-    cd /path/to/TmuxCoder
+    # Zero-config startup (auto-detects session name from directory)
     tmuxcoder
 
-    # Or set TMUXCODER_ROOT to run from anywhere
-    export TMUXCODER_ROOT=/path/to/TmuxCoder
-    tmuxcoder
+    # Start/attach to specific session
+    tmuxcoder myproject
 
-    # Skip build step if binaries already exist
-    tmuxcoder --skip-build
+    # Create new session
+    tmuxcoder new backend-dev
 
-    # Attach to existing session without rebuilding
-    tmuxcoder --attach-only
+    # List all sessions
+    tmuxcoder list
 
-    # Use custom server
-    tmuxcoder --server http://localhost:8080
+    # Stop a session
+    tmuxcoder stop myproject
+
+    # Show status
+    tmuxcoder status
+
+BEHAVIOR:
+    - Automatically creates tmux session if it doesn't exist
+    - Automatically starts daemon in background
+    - Automatically attaches to session
+    - Auto-detects session name from current directory
+    - Reuses existing sessions intelligently
 
 ENVIRONMENT VARIABLES:
-    TMUXCODER_ROOT            Path to TmuxCoder project directory
+    TMUXCODER_ROOT            Project root directory
     OPENCODE_SERVER           OpenCode API server URL
-    OPENCODE_SOCKET           IPC socket path (default: ~/.opencode/ipc.sock)
-    OPENCODE_STATE            State file path (default: ~/.opencode/state.json)
-    OPENCODE_TMUX_CONFIG      Config file path (default: ~/.opencode/tmux.yaml)
-    OPENCODE_AUTO_SERVER_PORT Auto-start server port (default: 55306)
+    OPENCODE_TMUX_CONFIG      Config file (default: ~/.opencode/tmux.yaml)
 
-For more information, visit: https://github.com/yourusername/TmuxCoder
+NOTES:
+    - This is the Phase 2 enhanced wrapper for opencode-tmux
+    - Implements true one-command workflow with auto-attach
+    - Legacy opencode-tmux commands still available via pass-through
+
+For more information: https://github.com/yourusername/TmuxCoder
 `
 	fmt.Print(help)
 }

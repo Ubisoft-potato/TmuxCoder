@@ -43,7 +43,8 @@ func CmdAttach(args []string) error {
 		// If auto-start is enabled, create the session
 		if *autoStart {
 			fmt.Printf("Session '%s' does not exist, creating it with --auto-start\n", sessionName)
-			// Delegate to start command
+			// Phase 1 Enhancement: Delegate to start command with --daemon
+			// The new behavior in start.go will handle auto-attachment
 			return CmdStart([]string{sessionName, "--daemon"})
 		}
 		// Return user-friendly error with hints
@@ -57,18 +58,18 @@ func CmdAttach(args []string) error {
 			fmt.Printf("Daemon not running for session '%s', starting it with --auto-start\n", sessionName)
 			log.Printf("Auto-starting daemon for orphaned session '%s'", sessionName)
 
-			// Start the daemon without attaching first
-			if err := CmdStart([]string{sessionName, "--daemon", "--detach"}); err != nil {
+			// Phase 1 Enhancement: Remove --detach flag so start command auto-attaches
+			// The new behavior in start.go will handle auto-attachment when --daemon is set
+			if err := CmdStart([]string{sessionName, "--daemon"}); err != nil {
 				return fmt.Errorf("failed to auto-start daemon: %w", err)
 			}
-
-			// Small delay to let daemon initialize
-			fmt.Printf("Daemon started, attaching to session...\n")
+			// start command will handle attachment, so return here
+			return nil
 		} else {
 			log.Printf("Warning: Orchestrator daemon is not running for session '%s'", sessionName)
 			log.Printf("Session exists but panels are not supervised")
 			fmt.Fprintf(os.Stderr, "Warning: Daemon not running (use --auto-start to start it automatically)\n")
-			fmt.Fprintf(os.Stderr, "Or manually start: opencode-tmux start %s --daemon --detach\n\n", sessionName)
+			fmt.Fprintf(os.Stderr, "Or manually start: opencode-tmux start %s --daemon\n\n", sessionName)
 		}
 	}
 
