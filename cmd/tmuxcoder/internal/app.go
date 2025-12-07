@@ -198,11 +198,8 @@ func (a *App) ReloadLayout(sessionName, layoutPath string) error {
 	if sessionName == "" {
 		return fmt.Errorf("session name is required for layout reload")
 	}
-	if layoutPath == "" {
-		return fmt.Errorf("layout path is required")
-	}
 
-	resolved, err := resolveFilePath(layoutPath)
+	resolved, err := resolveLayoutPath(layoutPath)
 	if err != nil {
 		return err
 	}
@@ -210,10 +207,6 @@ func (a *App) ReloadLayout(sessionName, layoutPath string) error {
 		return fmt.Errorf("layout file not accessible: %w", err)
 	} else if info.IsDir() {
 		return fmt.Errorf("layout path %s is a directory", resolved)
-	}
-
-	if err := a.ensureServer(); err != nil {
-		return err
 	}
 
 	if !a.isSessionRunning(sessionName) {
@@ -733,4 +726,19 @@ func resolveFilePath(path string) (string, error) {
 		path = abs
 	}
 	return path, nil
+}
+
+func resolveLayoutPath(path string) (string, error) {
+	if strings.TrimSpace(path) == "" {
+		if env := os.Getenv("OPENCODE_TMUX_CONFIG"); strings.TrimSpace(env) != "" {
+			path = env
+		} else {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return "", fmt.Errorf("failed to determine layout path: %w", err)
+			}
+			path = filepath.Join(home, ".opencode", "tmux.yaml")
+		}
+	}
+	return resolveFilePath(path)
 }

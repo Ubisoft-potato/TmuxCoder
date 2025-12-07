@@ -92,12 +92,15 @@ func main() {
 		}
 
 	case "layout":
-		if len(args) < 2 {
-			fmt.Fprintf(os.Stderr, "Error: layout command expects: tmuxcoder layout <session> <layout.yaml>\n")
+		if len(args) < 1 {
+			fmt.Fprintf(os.Stderr, "Error: layout command expects: tmuxcoder layout <session> [layout.yaml]\n")
 			os.Exit(1)
 		}
 		sessionName := args[0]
-		layoutPath := args[1]
+		layoutPath := ""
+		if len(args) > 1 {
+			layoutPath = args[1]
+		}
 		if err := app.ReloadLayout(sessionName, layoutPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -133,7 +136,7 @@ COMMANDS:
     (no command)           Smart start - auto-detect session and attach
     <session-name>         Start or attach to named session
     attach <name>          Attach to existing session (alias: a)
-    layout <name> <file>   Reload layout for session without attaching
+    layout <name> [file]   Reload layout for session without attaching
     stop <name> [--cleanup|-c]
                            Stop session daemon (alias: kill)
                            --cleanup: Also kill tmux session
