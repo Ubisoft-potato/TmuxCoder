@@ -50,28 +50,7 @@ In TmuxCoder, tmux acts as:
 
 ### 2.3 Process Topology
 
-```mermaid
-graph TD
-    User[User Terminal] -->|Attaches to| Tmux[Tmux Server]
-    
-    subgraph Tmux Session
-        P1[Panel: Sessions]
-        P2[Panel: Messages]
-        P3[Panel: Input]
-    end
-    
-    Tmux --> P1
-    Tmux --> P2
-    Tmux --> P3
-    
-    subgraph Background
-        Daemon[Orchestrator Daemon]
-    end
-    
-    P1 <-->|IPC / Unix Socket| Daemon
-    P2 <-->|IPC / Unix Socket| Daemon
-    P3 <-->|IPC / Unix Socket| Daemon
-```
+![Process Topology](process-tmux-flow.svg)
 
 ## 3. Design Decisions Analysis
 
@@ -148,8 +127,6 @@ For a "coding assistant", the ability to have the assistant live *alongside* you
 
 | Approach | Persistence | Multi-Pane | Complexity | Best For |
 | :--- | :--- | :--- | :--- | :--- |
-| **CLI REPL** | No | No | Low | Quick Q&A |
-| **IDE Plugin** | Yes (IDE managed) | Yes | High | VS Code users |
 | **Single TUI** | No (usually) | Emulated | Medium | Simple tools |
 | **TmuxCoder** | **Yes** | **Native** | **High** | **Power users / DevOps** |
 

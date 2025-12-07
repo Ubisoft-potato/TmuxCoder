@@ -76,9 +76,8 @@ Use `tmuxcoder --server http://host:port` to point at an existing OpenCode deplo
 
 ### 5. Customize Layout & Config
 
-- `tmuxcoder layout <session> path/to/layout.yaml` hot-reloads a layout for an existing session without attaching.
-- `tmuxcoder <session> --layout path/to/layout.yaml` overrides the layout and attaches (omitting `<session>` falls back to the auto-detected name).
-- `tmuxcoder -- --reload-layout` reuses whatever layout the daemon last loaded.
+- `tmuxcoder layout <session> path/to/layout.yaml` reloads the layout for a **running** session without attaching (fails fast if that session/daemon isn’t up yet).
+
 - Environment variables:
 
   | Variable | Default | Description |
@@ -95,7 +94,6 @@ Need the full architecture story later? See [docs/TMUX_ARCHITECTURE.md](docs/TMU
 - Panel + orchestrator logs: `~/.opencode/*.log`
 - State snapshots: `~/.opencode/states/<session>.json`
 - Quick fixes:
-  - Panels missing? `tmuxcoder -- --reload-layout`
   - IPC errors? Remove stale socket `rm ~/.opencode/ipc.sock`
   - YAML mistakes? `yamllint ~/.opencode/tmux.yaml`
 
@@ -107,36 +105,4 @@ Common symptoms:
 
 If everything looks stuck, run `tmuxcoder stop <name> --cleanup`, then `tmuxcoder` again for a clean slate.
 
-## Contributing
 
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-**Before submitting:**
-- Run tests: `go test ./...`
-- Format code: `go fmt ./...`
-- Update docs if adding features
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Project Status
-
-Active development. The core orchestration and panel system is stable. Upcoming work includes:
-- [ ] Plugin system for custom panels
-- [ ] Better error recovery
-- [ ] Windows/WSL support
-- [ ] Configuration UI
-
----
-
-For implementation details, see:
-- Orchestrator: [cmd/opencode-tmux/main.go](cmd/opencode-tmux/main.go)
-- Panels: [internal/panels/](internal/panels/)
-- IPC: [internal/ipc](internal/ipc)
