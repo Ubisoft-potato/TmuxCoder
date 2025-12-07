@@ -1,21 +1,10 @@
-# TmuxCoder Architecture Deep Dive: Why Tmux?
+# TmuxCoder Architecture Overview
 
 ## 1. Core Design Problem
 
-### 1.1 The Challenge of AI Coding Sessions
-AI coding sessions are fundamentally different from standard terminal interactions:
-- **Long-running**: Sessions can last hours or days.
-- **Stateful**: Context (chat history, code snippets, user intent) must be preserved.
-- **Asynchronous**: AI responses stream in over time; the user shouldn't be blocked.
-- **Resilient**: If the UI crashes or the connection drops, the "brain" (context) must not be lost.
+![Architecture Overview](architecture.svg)
 
-### 1.2 Limitations of Traditional TUI Apps
-A standard Bubble Tea or ncurses application runs as a single process. If you close the terminal window, the process dies. If the process crashes, the state is lost. To achieve persistence, you typically need a client-server architecture where the server runs as a daemon.
-
-### 1.3 The Three Key Requirements
-1.  **Persistence**: Work must survive window closures and network disconnects.
-2.  **Multitasking**: Users need to see chat, code, and input simultaneously in a tiled layout.
-3.  **Separation of Concerns**: The UI should be decoupled from the logic that manages the AI interaction.
+AI coding sessions demand persistence, multitasking, and a clean split between the orchestrator “brain” and the tmux “hands.” The diagram shows how TmuxCoder keeps those roles separate so responses stream asynchronously, survive UI crashes, and retain state after every client detaches. Traditional single-process TUIs rarely hit all three goals without writing a custom daemon; tmux already provides the process management and layout control we need.
 
 ## 2. The Role of tmux
 
