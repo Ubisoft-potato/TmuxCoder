@@ -2778,7 +2778,7 @@ func runLegacyMode() {
 
 	// Get configuration from environment
 	serverURL := os.Getenv("OPENCODE_SERVER")
-	if serverURL == "" && !serverOnly {
+	if serverURL == "" && !serverOnly && !reloadLayoutFlag {
 		log.Fatal("OPENCODE_SERVER environment variable not set")
 	}
 

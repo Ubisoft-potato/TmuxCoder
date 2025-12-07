@@ -74,7 +74,7 @@ func CmdList(args []string) error {
 		// Show hint for orphaned sessions
 		if overallStatus == "Orphaned" {
 			if status.TmuxRunning && !status.DaemonRunning {
-				fmt.Printf("  → Orphaned session (daemon stopped), use: opencode-tmux start %s --reuse\n", session)
+				fmt.Printf("  → Orphaned session (daemon stopped), use: tmuxcoder %s \n", session)
 			}
 		}
 	}
