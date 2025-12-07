@@ -91,6 +91,18 @@ func main() {
 			os.Exit(1)
 		}
 
+	case "layout":
+		if len(args) < 2 {
+			fmt.Fprintf(os.Stderr, "Error: layout command expects: tmuxcoder layout <session> <layout.yaml>\n")
+			os.Exit(1)
+		}
+		sessionName := args[0]
+		layoutPath := args[1]
+		if err := app.ReloadLayout(sessionName, layoutPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
 	default:
 		// If first arg looks like a session name (no dashes), treat as smart start
 		if cmd[0] != '-' {
@@ -122,6 +134,7 @@ COMMANDS:
     <session-name>         Start or attach to named session
     new <name>             Create new session (alias: start)
     attach <name>          Attach to existing session (alias: a)
+    layout <name> <file>   Reload layout for session without attaching
     stop <name> [--cleanup|-c]
                            Stop session daemon (alias: kill)
                            --cleanup: Also kill tmux session
@@ -170,6 +183,7 @@ ENVIRONMENT VARIABLES:
 
 type globalOptions struct {
 	layoutPath string
+	serverURL  string
 }
 
 func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
@@ -204,6 +218,26 @@ func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
 			continue
 		}
 
+		if arg == "--server" || strings.HasPrefix(arg, "--server=") {
+			value := ""
+			if arg == "--server" {
+				if i+1 >= len(args) {
+					return nil, opts, fmt.Errorf("--server requires a URL")
+				}
+				value = args[i+1]
+				i++
+			} else {
+				value = strings.TrimPrefix(arg, "--server=")
+			}
+
+			if value == "" {
+				return nil, opts, fmt.Errorf("--server requires a URL")
+			}
+
+			opts.serverURL = value
+			continue
+		}
+
 		remaining = append(remaining, arg)
 	}
 
@@ -213,26 +247,33 @@ func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
 func applyGlobalOptions(opts globalOptions) error {
 	if opts.layoutPath == "" {
 		_ = os.Unsetenv("TMUXCODER_LAYOUT_OVERRIDE_PATH")
-		return nil
+	} else {
+		resolved, err := resolvePath(opts.layoutPath)
+		if err != nil {
+			return fmt.Errorf("invalid layout path: %w", err)
+		}
+
+		if _, err := os.Stat(resolved); err != nil {
+			return fmt.Errorf("layout file not accessible: %w", err)
+		}
+
+		if err := os.Setenv("OPENCODE_TMUX_CONFIG", resolved); err != nil {
+			return fmt.Errorf("failed to set OPENCODE_TMUX_CONFIG: %w", err)
+		}
+		if err := os.Setenv("TMUXCODER_LAYOUT_OVERRIDE_PATH", resolved); err != nil {
+			return fmt.Errorf("failed to propagate layout override: %w", err)
+		}
+
+		fmt.Printf("Using layout config: %s\n", resolved)
 	}
 
-	resolved, err := resolvePath(opts.layoutPath)
-	if err != nil {
-		return fmt.Errorf("invalid layout path: %w", err)
+	if opts.serverURL != "" {
+		if err := os.Setenv("OPENCODE_SERVER", opts.serverURL); err != nil {
+			return fmt.Errorf("failed to set OPENCODE_SERVER: %w", err)
+		}
+		fmt.Printf("Using OpenCode server: %s\n", opts.serverURL)
 	}
 
-	if _, err := os.Stat(resolved); err != nil {
-		return fmt.Errorf("layout file not accessible: %w", err)
-	}
-
-	if err := os.Setenv("OPENCODE_TMUX_CONFIG", resolved); err != nil {
-		return fmt.Errorf("failed to set OPENCODE_TMUX_CONFIG: %w", err)
-	}
-	if err := os.Setenv("TMUXCODER_LAYOUT_OVERRIDE_PATH", resolved); err != nil {
-		return fmt.Errorf("failed to propagate layout override: %w", err)
-	}
-
-	fmt.Printf("Using layout config: %s\n", resolved)
 	return nil
 }
 

@@ -193,6 +193,52 @@ func (a *App) ShowStatus(args []string) error {
 	return cmd.Run()
 }
 
+// ReloadLayout applies a new layout config to an existing session without attaching
+func (a *App) ReloadLayout(sessionName, layoutPath string) error {
+	if sessionName == "" {
+		return fmt.Errorf("session name is required for layout reload")
+	}
+	if layoutPath == "" {
+		return fmt.Errorf("layout path is required")
+	}
+
+	resolved, err := resolveFilePath(layoutPath)
+	if err != nil {
+		return err
+	}
+	if info, err := os.Stat(resolved); err != nil {
+		return fmt.Errorf("layout file not accessible: %w", err)
+	} else if info.IsDir() {
+		return fmt.Errorf("layout path %s is a directory", resolved)
+	}
+
+	if err := a.ensureServer(); err != nil {
+		return err
+	}
+
+	if !a.isSessionRunning(sessionName) {
+		return fmt.Errorf("session '%s' is not running (start it first)", sessionName)
+	}
+
+	fmt.Printf("Reloading layout for session '%s' using %s...\n", sessionName, resolved)
+
+	cmd := exec.Command(a.binPath, "--reload-layout", sessionName)
+	env := append([]string{}, os.Environ()...)
+	env = append(env,
+		"OPENCODE_TMUX_CONFIG="+resolved,
+		"TMUXCODER_LAYOUT_OVERRIDE_PATH="+resolved,
+	)
+	cmd.Env = env
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to reload layout: %w", err)
+	}
+
+	return nil
+}
+
 // PassThrough passes through to opencode-tmux for legacy compatibility
 func (a *App) PassThrough(args []string) error {
 	if err := a.ensureServer(); err != nil {
@@ -658,4 +704,33 @@ func searchUpward(startDir string) string {
 		}
 		dir = parent
 	}
+}
+
+func resolveFilePath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = home
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, path[2:])
+	}
+
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		path = abs
+	}
+	return path, nil
 }
