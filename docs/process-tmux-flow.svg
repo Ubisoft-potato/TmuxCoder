@@ -1,0 +1,69 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="780" height="420" viewBox="0 0 780 420">
+  <style>
+    .box { fill:#f8fbff; stroke:#2b4b7c; stroke-width:2; }
+    .subbox { fill:#fff5e6; stroke:#d27b00; stroke-width:1.5; }
+    .tmux { fill:#fff; stroke:#4c4c4c; stroke-width:2; stroke-dasharray:6 4; }
+    .text { font:14px "Helvetica Neue", Arial, sans-serif; fill:#0f172a; }
+    .arrow { stroke:#475569; stroke-width:2; marker-end:url(#arrowhead); fill:none; }
+    .dashed { stroke-dasharray:5 4; }
+  </style>
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#475569"/>
+    </marker>
+  </defs>
+
+  <!-- User Shell -->
+  <rect class="box" x="30" y="60" width="150" height="60" rx="8" ry="8"/>
+  <text class="text" x="105" y="95" text-anchor="middle">User Shell / CLI</text>
+
+  <!-- Orchestrator -->
+  <rect class="box" x="230" y="30" width="220" height="180" rx="10" ry="10"/>
+  <text class="text" x="340" y="60" text-anchor="middle">TmuxOrchestrator</text>
+  <rect class="subbox" x="245" y="80" width="190" height="36" rx="6" ry="6"/>
+  <text class="text" x="340" y="103" text-anchor="middle">IPC Server + State Sync</text>
+  <rect class="subbox" x="245" y="126" width="190" height="36" rx="6" ry="6"/>
+  <text class="text" x="340" y="149" text-anchor="middle">Client Tracker / Supervisors</text>
+
+  <!-- tmux server -->
+  <rect class="tmux" x="500" y="40" width="250" height="220" rx="12" ry="12"/>
+  <text class="text" x="625" y="65" text-anchor="middle">tmux Server (session:0)</text>
+  <rect class="subbox" x="520" y="90" width="210" height="40" rx="6" ry="6"/>
+  <text class="text" x="625" y="115" text-anchor="middle">Pane %0 → Sessions Panel</text>
+  <rect class="subbox" x="520" y="140" width="210" height="40" rx="6" ry="6"/>
+  <text class="text" x="625" y="165" text-anchor="middle">Pane %1 → Messages Panel</text>
+  <rect class="subbox" x="520" y="190" width="210" height="40" rx="6" ry="6"/>
+  <text class="text" x="625" y="215" text-anchor="middle">Pane %2 → Input Panel</text>
+
+  <!-- Attach clients -->
+  <rect class="box" x="540" y="290" width="90" height="60" rx="8" ry="8"/>
+  <text class="text" x="585" y="323" text-anchor="middle">tmux attach</text>
+  <rect class="box" x="660" y="290" width="90" height="60" rx="8" ry="8"/>
+  <text class="text" x="705" y="323" text-anchor="middle">tmux attach -r</text>
+
+  <!-- IPC connections -->
+  <line class="arrow" x1="380" y1="98" x2="520" y2="110"/>
+  <line class="arrow dashed" x1="520" y1="210" x2="380" y2="180"/>
+  <text class="text" x="450" y="88" text-anchor="middle">tmux control (layout/panes)</text>
+  <text class="text" x="450" y="205" text-anchor="middle">Pane status / restart</text>
+
+  <!-- CLI to orchestrator arrow -->
+  <line class="arrow" x1="180" y1="90" x2="230" y2="90"/>
+  <text class="text" x="205" y="75" text-anchor="middle">start/stop/status</text>
+
+  <!-- Orchestrator to attach clients -->
+  <line class="arrow dashed" x1="625" y1="260" x2="585" y2="290"/>
+  <line class="arrow dashed" x1="650" y1="260" x2="705" y2="290"/>
+  <text class="text" x="645" y="272" text-anchor="middle">tmux session clients</text>
+
+  <!-- SSE / External -->
+  <rect class="box" x="230" y="240" width="220" height="60" rx="8" ry="8"/>
+  <text class="text" x="340" y="273" text-anchor="middle">OpenCode HTTP / SSE</text>
+  <line class="arrow" x1="340" y1="240" x2="340" y2="210"/>
+  <text class="text" x="360" y="225">events/state</text>
+
+  <!-- Recovery path -->
+  <line class="arrow dashed" x1="110" y1="150" x2="330" y2="210"/>
+  <text class="text" x="210" y="190" text-anchor="middle">recovery: reuse session / socket</text>
+</svg>
