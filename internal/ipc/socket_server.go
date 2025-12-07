@@ -582,7 +582,15 @@ func (server *SocketServer) handleOrchestratorCommand(clientConn *ClientConnecti
 	// Execute command
 	switch cmdLower {
 	case "reload_layout":
-		if err := server.control.ReloadLayout(); err != nil {
+		var configPath string
+		if payload.Params != nil {
+			if val, ok := payload.Params["config_path"]; ok {
+				if pathStr, ok2 := val.(string); ok2 {
+					configPath = strings.TrimSpace(pathStr)
+				}
+			}
+		}
+		if err := server.control.ReloadLayout(configPath); err != nil {
 			log.Printf("Reload layout command failed: %v", err)
 			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
 			return

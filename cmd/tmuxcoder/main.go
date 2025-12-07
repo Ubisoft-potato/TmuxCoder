@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/opencode/tmux_coder/cmd/tmuxcoder/internal"
@@ -12,6 +14,17 @@ import (
 const version = "2.0.0"
 
 func main() {
+	remainingArgs, opts, err := parseGlobalOptions(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
+	if err := applyGlobalOptions(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		os.Exit(1)
+	}
+
 	app := internal.NewApp()
 	defer app.Close()
 
@@ -25,7 +38,7 @@ func main() {
 	}()
 
 	// Handle zero-argument case: smart start
-	if len(os.Args) == 1 {
+	if len(remainingArgs) == 0 {
 		if err := app.SmartStart(""); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 			os.Exit(1)
@@ -34,10 +47,10 @@ func main() {
 	}
 
 	// Parse command
-	cmd := os.Args[1]
+	cmd := remainingArgs[0]
 	args := []string{}
-	if len(os.Args) > 2 {
-		args = os.Args[2:]
+	if len(remainingArgs) > 1 {
+		args = remainingArgs[1:]
 	}
 
 	// Handle subcommands
@@ -87,7 +100,7 @@ func main() {
 			}
 		} else {
 			// Pass through to opencode-tmux for legacy flags
-			if err := app.PassThrough(os.Args[1:]); err != nil {
+			if err := app.PassThrough(remainingArgs); err != nil {
 				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 				os.Exit(1)
 			}
@@ -99,7 +112,10 @@ func printHelp() {
 	help := `tmuxcoder - Zero-config AI coding orchestrator
 
 USAGE:
-    tmuxcoder [COMMAND] [OPTIONS]
+    tmuxcoder [GLOBAL OPTIONS] [COMMAND] [OPTIONS]
+
+GLOBAL OPTIONS:
+    --layout <path>         Override layout config (sets OPENCODE_TMUX_CONFIG)
 
 COMMANDS:
     (no command)           Smart start - auto-detect session and attach
@@ -150,4 +166,102 @@ ENVIRONMENT VARIABLES:
 
 `
 	fmt.Print(help)
+}
+
+type globalOptions struct {
+	layoutPath string
+}
+
+func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
+	opts := globalOptions{}
+	remaining := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		if arg == "--" {
+			remaining = append(remaining, args[i:]...)
+			break
+		}
+
+		if arg == "--layout" || strings.HasPrefix(arg, "--layout=") {
+			value := ""
+			if arg == "--layout" {
+				if i+1 >= len(args) {
+					return nil, opts, fmt.Errorf("--layout requires a file path")
+				}
+				value = args[i+1]
+				i++
+			} else {
+				value = strings.TrimPrefix(arg, "--layout=")
+			}
+
+			if value == "" {
+				return nil, opts, fmt.Errorf("--layout requires a file path")
+			}
+
+			opts.layoutPath = value
+			continue
+		}
+
+		remaining = append(remaining, arg)
+	}
+
+	return remaining, opts, nil
+}
+
+func applyGlobalOptions(opts globalOptions) error {
+	if opts.layoutPath == "" {
+		_ = os.Unsetenv("TMUXCODER_LAYOUT_OVERRIDE_PATH")
+		return nil
+	}
+
+	resolved, err := resolvePath(opts.layoutPath)
+	if err != nil {
+		return fmt.Errorf("invalid layout path: %w", err)
+	}
+
+	if _, err := os.Stat(resolved); err != nil {
+		return fmt.Errorf("layout file not accessible: %w", err)
+	}
+
+	if err := os.Setenv("OPENCODE_TMUX_CONFIG", resolved); err != nil {
+		return fmt.Errorf("failed to set OPENCODE_TMUX_CONFIG: %w", err)
+	}
+	if err := os.Setenv("TMUXCODER_LAYOUT_OVERRIDE_PATH", resolved); err != nil {
+		return fmt.Errorf("failed to propagate layout override: %w", err)
+	}
+
+	fmt.Printf("Using layout config: %s\n", resolved)
+	return nil
+}
+
+func resolvePath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = home
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, path[2:])
+	}
+
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		path = abs
+	}
+
+	return path, nil
 }

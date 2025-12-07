@@ -153,6 +153,9 @@ func handleReloadLayout(opts *StartOptions) error {
 		return fmt.Errorf("daemon not running for session '%s'", opts.SessionName)
 	}
 
+	// Prepare override path (if any)
+	overridePath := resolveReloadConfigPath(opts)
+
 	// Send reload command via IPC
 	client := ipc.NewSocketClient(socketPath, fmt.Sprintf("cli-reload-%d", os.Getpid()), "controller")
 	if err := client.Connect(); err != nil {
@@ -160,12 +163,47 @@ func handleReloadLayout(opts *StartOptions) error {
 	}
 	defer client.Disconnect()
 
-	if err := client.SendOrchestratorCommand("reload:layout"); err != nil {
+	params := map[string]interface{}{}
+	if overridePath != "" {
+		params["config_path"] = overridePath
+	}
+
+	if err := client.SendOrchestratorCommandWithParams("reload_layout", params); err != nil {
 		return fmt.Errorf("failed to send reload command: %w", err)
 	}
 
 	fmt.Println("Reload layout command sent successfully.")
 	return nil
+}
+
+func resolveReloadConfigPath(opts *StartOptions) string {
+	path := ""
+	if opts.LayoutPath != "" {
+		path = opts.LayoutPath
+	} else if opts.ConfigPath != "" {
+		path = opts.ConfigPath
+	} else if env := os.Getenv("OPENCODE_TMUX_CONFIG"); env != "" {
+		path = env
+	}
+
+	if path == "" {
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(homeDir, ".opencode", "tmux.yaml")
+	}
+
+	if strings.HasPrefix(path, "~/") {
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			path = filepath.Join(homeDir, path[2:])
+		}
+	}
+
+	if abs, err := filepath.Abs(path); err == nil {
+		return abs
+	}
+	return path
 }
 
 // executeStart performs the actual start operation

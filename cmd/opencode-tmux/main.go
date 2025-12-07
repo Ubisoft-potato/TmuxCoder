@@ -1468,7 +1468,7 @@ func (orch *TmuxOrchestrator) paneExists(target string) bool {
 func (orch *TmuxOrchestrator) recoverMissingPane(panelID, panelType string) (string, error) {
 	log.Printf("[TMUX] Attempting pane recovery for %s (%s)", panelID, panelType)
 	if orch.layout != nil {
-		if err := orch.ReloadLayout(); err != nil {
+		if err := orch.ReloadLayout(""); err != nil {
 			return "", err
 		}
 	} else {
@@ -1903,11 +1903,11 @@ func (orch *TmuxOrchestrator) verifyPanelsRunning() bool {
 }
 
 // ReloadLayout reapplies the tmux layout from configuration without restarting running panels.
-func (orch *TmuxOrchestrator) ReloadLayout() error {
+func (orch *TmuxOrchestrator) ReloadLayout(configOverride string) error {
 	if orch.serverOnly {
 		return fmt.Errorf("cannot reload layout in server-only mode")
 	}
-	if orch.configPath == "" {
+	if orch.configPath == "" && strings.TrimSpace(configOverride) == "" {
 		return fmt.Errorf("layout config path is not configured")
 	}
 	if !orch.sessionExists() {
@@ -1917,9 +1917,32 @@ func (orch *TmuxOrchestrator) ReloadLayout() error {
 	orch.layoutMutex.Lock()
 	defer orch.layoutMutex.Unlock()
 
-	layoutCfg, err := tmuxconfig.LoadLayout(orch.configPath)
+	targetPath := strings.TrimSpace(configOverride)
+	if targetPath == "" {
+		targetPath = orch.configPath
+	}
+	if targetPath == "" {
+		return fmt.Errorf("layout config path is empty")
+	}
+	if strings.HasPrefix(targetPath, "~/") {
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			targetPath = filepath.Join(homeDir, targetPath[2:])
+		}
+	}
+	if !filepath.IsAbs(targetPath) {
+		if abs, err := filepath.Abs(targetPath); err == nil {
+			targetPath = abs
+		}
+	}
+
+	layoutCfg, err := tmuxconfig.LoadLayout(targetPath)
 	if err != nil {
 		return fmt.Errorf("failed to load layout config: %w", err)
+	}
+
+	if targetPath != orch.configPath {
+		log.Printf("Reload layout requested with new config path: %s (was %s)", targetPath, orch.configPath)
+		orch.configPath = targetPath
 	}
 
 	oldWindowTarget := fmt.Sprintf("%s:0", orch.sessionName)
@@ -2211,7 +2234,7 @@ func (orch *TmuxOrchestrator) listTmuxClients() ([]interfaces.ClientInfo, error)
 }
 
 // sendReloadLayoutCommand connects to the running orchestrator and requests a layout reload.
-func sendReloadLayoutCommand(socketPath, sessionName string) error {
+func sendReloadLayoutCommand(socketPath, sessionName, configPath string) error {
 	socketPath = strings.TrimSpace(socketPath)
 	if socketPath == "" {
 		return fmt.Errorf("socket path is empty")
@@ -2233,7 +2256,11 @@ func sendReloadLayoutCommand(socketPath, sessionName string) error {
 		_ = client.Disconnect()
 	}()
 
-	if err := client.SendOrchestratorCommand("reload_layout"); err != nil {
+	params := map[string]interface{}{}
+	if strings.TrimSpace(configPath) != "" {
+		params["config_path"] = configPath
+	}
+	if err := client.SendOrchestratorCommandWithParams("reload_layout", params); err != nil {
 		return err
 	}
 	return nil
@@ -2813,7 +2840,7 @@ func runLegacyMode() {
 				sessionName = name
 			}
 		}
-		if err := sendReloadLayoutCommand(socketPath, sessionName); err != nil {
+		if err := sendReloadLayoutCommand(socketPath, sessionName, configPath); err != nil {
 			fmt.Fprintf(os.Stderr, "Reload layout failed: %v\n", err)
 			os.Exit(1)
 		}

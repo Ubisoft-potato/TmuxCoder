@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -24,6 +25,9 @@ type App struct {
 	serverURL   string
 	serverOwned bool
 	cleanupOnce sync.Once
+
+	layoutOverride string
+	layoutApplied  bool
 }
 
 const (
@@ -50,8 +54,9 @@ func NewApp() *App {
 	}
 
 	return &App{
-		projectRoot: projectRoot,
-		binPath:     binPath,
+		projectRoot:    projectRoot,
+		binPath:        binPath,
+		layoutOverride: os.Getenv("TMUXCODER_LAYOUT_OVERRIDE_PATH"),
 	}
 }
 
@@ -78,6 +83,9 @@ func (a *App) SmartStart(sessionName string) error {
 
 	// 2. Check if session already exists and is running
 	if a.isSessionRunning(sessionName) {
+		if err := a.maybeApplyLayoutOverride(sessionName); err != nil {
+			return err
+		}
 		fmt.Printf("Session '%s' is already running\n", sessionName)
 		fmt.Printf("Attaching to existing session...\n")
 		return a.attachToSession(sessionName, false)
@@ -128,6 +136,16 @@ func (a *App) AttachSession(args []string) error {
 	sessionName := "opencode"
 	if len(args) > 0 {
 		sessionName = args[0]
+	}
+
+	if err := a.ensureServer(); err != nil {
+		return err
+	}
+
+	if a.isSessionRunning(sessionName) {
+		if err := a.maybeApplyLayoutOverride(sessionName); err != nil {
+			return err
+		}
 	}
 
 	return a.attachToSession(sessionName, false)
@@ -199,8 +217,27 @@ func (a *App) PassThrough(args []string) error {
 	cmd.Env = os.Environ()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+
+	var stderrBuf bytes.Buffer
+	cmd.Stderr = &stderrBuf
+
+	err := cmd.Run()
+	if err == nil {
+		if stderrBuf.Len() > 0 {
+			_, _ = os.Stderr.Write(stderrBuf.Bytes())
+		}
+		return nil
+	}
+
+	if userErr := a.sanitizePassThroughError(args, stderrBuf.String()); userErr != nil {
+		return userErr
+	}
+
+	if stderrBuf.Len() > 0 {
+		_, _ = os.Stderr.Write(stderrBuf.Bytes())
+	}
+
+	return err
 }
 
 // --- Helper methods ---
@@ -289,6 +326,87 @@ func (a *App) isSessionRunning(sessionName string) bool {
 
 	// Fallback to legacy text parsing if JSON output isn't available
 	return strings.Contains(string(output), "Orchestrator Daemon: ✓")
+}
+
+func (a *App) sanitizePassThroughError(args []string, stderr string) error {
+	msg := strings.TrimSpace(stderr)
+	if msg == "" {
+		return nil
+	}
+
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "flag provided but not defined") ||
+		strings.Contains(lower, "unknown shorthand flag") ||
+		strings.Contains(lower, "unknown flag") {
+		flagName := extractFlagName(msg)
+		if flagName == "" && len(args) > 0 {
+			flagName = args[0]
+		}
+		if flagName == "" {
+			flagName = "specified option"
+		}
+		return fmt.Errorf("unrecognized option %s (run 'tmuxcoder help' for usage)", flagName)
+	}
+
+	if strings.Contains(lower, "usage of") && strings.Contains(lower, "opencode-tmux") {
+		return fmt.Errorf("invalid tmuxcoder arguments (run 'tmuxcoder help')")
+	}
+
+	return nil
+}
+
+func extractFlagName(msg string) string {
+	patterns := []string{
+		"flag provided but not defined:",
+		"unknown shorthand flag:",
+		"unknown flag:",
+	}
+
+	for _, pattern := range patterns {
+		if idx := strings.Index(msg, pattern); idx >= 0 {
+			remainder := strings.TrimSpace(msg[idx+len(pattern):])
+			if remainder == "" {
+				continue
+			}
+
+			// Handle formats like "'s' in -server"
+			if strings.Contains(remainder, " in ") {
+				if parts := strings.SplitN(remainder, " in ", 2); len(parts) == 2 {
+					fields := strings.Fields(parts[1])
+					if len(fields) > 0 {
+						return fields[0]
+					}
+				}
+			}
+
+			fields := strings.Fields(remainder)
+			if len(fields) > 0 {
+				return fields[0]
+			}
+		}
+	}
+
+	return ""
+}
+
+func (a *App) maybeApplyLayoutOverride(sessionName string) error {
+	if a.layoutOverride == "" || a.layoutApplied {
+		return nil
+	}
+
+	fmt.Printf("Reloading layout for session '%s' using %s...\n", sessionName, a.layoutOverride)
+
+	cmd := exec.Command(a.binPath, "--reload-layout", sessionName)
+	cmd.Env = os.Environ()
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to reload layout: %w", err)
+	}
+
+	a.layoutApplied = true
+	return nil
 }
 
 // startDaemonBackground starts a daemon in background
