@@ -132,7 +132,6 @@ GLOBAL OPTIONS:
 COMMANDS:
     (no command)           Smart start - auto-detect session and attach
     <session-name>         Start or attach to named session
-    new <name>             Create new session (alias: start)
     attach <name>          Attach to existing session (alias: a)
     layout <name> <file>   Reload layout for session without attaching
     stop <name> [--cleanup|-c]
@@ -149,9 +148,6 @@ EXAMPLES:
 
     # Start/attach to specific session
     tmuxcoder myproject
-
-    # Create new session
-    tmuxcoder new backend-dev
 
     # List all sessions
     tmuxcoder list

@@ -67,7 +67,7 @@ Detach with the normal tmux shortcut (`Ctrl-b d`) and re-run `tmuxcoder` to jump
 |---------|--------------|
 | `tmuxcoder list` | Show managed sessions (no server start needed) |
 | `tmuxcoder status <name>` | Inspect tmux/daemon status |
-| `tmuxcoder new <name>` | Create or attach to a named session |
+| `tmuxcoder <name>` | Create or attach to a named session |
 | `tmuxcoder attach <name>` | Attach without rebuilding |
 | `tmuxcoder stop <name>` | Stop daemon only |
 | `tmuxcoder stop <name> --cleanup` | Stop daemon and kill tmux session |
