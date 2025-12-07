@@ -110,9 +110,6 @@ func (a *App) SmartStart(sessionName string) error {
 
 // ListSessions lists all running sessions
 func (a *App) ListSessions() error {
-	if err := a.ensureServer(); err != nil {
-		return err
-	}
 	cmd := exec.Command(a.binPath, "list")
 	cmd.Env = os.Environ()
 	cmd.Stdin = os.Stdin
@@ -136,10 +133,6 @@ func (a *App) AttachSession(args []string) error {
 	sessionName := "opencode"
 	if len(args) > 0 {
 		sessionName = args[0]
-	}
-
-	if err := a.ensureServer(); err != nil {
-		return err
 	}
 
 	if a.isSessionRunning(sessionName) {
@@ -166,10 +159,6 @@ func (a *App) StopSession(args []string) error {
 		}
 	}
 
-	if err := a.ensureServer(); err != nil {
-		return err
-	}
-
 	// Build command args
 	// Note: opencode-tmux expects: stop --cleanup <session-name>
 	cmdArgs := []string{"stop"}
@@ -193,10 +182,6 @@ func (a *App) ShowStatus(args []string) error {
 		fmt.Println("Available sessions:")
 		fmt.Println("")
 		return a.ListSessions()
-	}
-
-	if err := a.ensureServer(); err != nil {
-		return err
 	}
 
 	sessionName := args[0]
