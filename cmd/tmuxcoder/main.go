@@ -3,170 +3,305 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"strings"
+	"syscall"
+
+	"github.com/opencode/tmux_coder/cmd/tmuxcoder/internal"
 )
 
-const version = "1.0.0"
+const version = "2.0.0"
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
-		case "version", "-v", "--version":
-			fmt.Printf("tmuxcoder v%s\n", version)
-			return
-		case "help", "-h", "--help":
-			printHelp()
-			return
-		}
-	}
-
-	// Find project root - try multiple strategies
-	projectRoot := findProjectRoot()
-	if projectRoot == "" {
-		fmt.Fprintf(os.Stderr, "Error: could not find project root (looking for scripts/start.sh)\n")
-		fmt.Fprintf(os.Stderr, "\nPlease run tmuxcoder from the project directory, or set TMUXCODER_ROOT:\n")
-		fmt.Fprintf(os.Stderr, "  cd /path/to/TmuxCoder\n")
-		fmt.Fprintf(os.Stderr, "  ./tmuxcoder\n")
-		fmt.Fprintf(os.Stderr, "\nOr:\n")
-		fmt.Fprintf(os.Stderr, "  export TMUXCODER_ROOT=/path/to/TmuxCoder\n")
-		fmt.Fprintf(os.Stderr, "  tmuxcoder\n")
+	remainingArgs, opts, err := parseGlobalOptions(os.Args[1:])
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Path to the start script
-	startScript := filepath.Join(projectRoot, "scripts", "start.sh")
-	if _, err := os.Stat(startScript); os.IsNotExist(err) {
-		fmt.Fprintf(os.Stderr, "Error: start script not found at %s\n", startScript)
+	if err := applyGlobalOptions(opts); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
 		os.Exit(1)
 	}
 
-	// Prepare arguments for the start script
-	var args []string
-	if len(os.Args) > 1 {
-		args = os.Args[1:]
-	}
+	app := internal.NewApp()
+	defer app.Close()
 
-	// Execute the start script
-	cmd := exec.Command(startScript, args...)
-	cmd.Stdin = os.Stdin
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Env = os.Environ()
-
-	if err := cmd.Run(); err != nil {
-		if exitErr, ok := err.(*exec.ExitError); ok {
-			os.Exit(exitErr.ExitCode())
-		}
-		fmt.Fprintf(os.Stderr, "Error: failed to execute start script: %v\n", err)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		sig := <-sigCh
+		fmt.Fprintf(os.Stderr, "\nReceived %s, shutting down...\n", sig)
+		app.Close()
 		os.Exit(1)
-	}
-}
+	}()
 
-// findProjectRoot tries multiple strategies to find the project root
-func findProjectRoot() string {
-	// Strategy 1: Check TMUXCODER_ROOT environment variable
-	if root := os.Getenv("TMUXCODER_ROOT"); root != "" {
-		if isProjectRoot(root) {
-			return root
+	// Handle zero-argument case: smart start
+	if len(remainingArgs) == 0 {
+		if err := app.SmartStart(""); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
-	}
-
-	// Strategy 2: Check current working directory
-	if cwd, err := os.Getwd(); err == nil {
-		if isProjectRoot(cwd) {
-			return cwd
-		}
-		// Also try searching upward from cwd
-		if root := searchUpward(cwd); root != "" {
-			return root
-		}
+		return
 	}
 
-	// Strategy 3: Try to find from executable location (for when running ./tmuxcoder)
-	if execPath, err := os.Executable(); err == nil {
-		execPath, _ = filepath.EvalSymlinks(execPath)
-		execDir := filepath.Dir(execPath)
-
-		// If running from project directory (./tmuxcoder)
-		if isProjectRoot(execDir) {
-			return execDir
-		}
-
-		// Try searching upward from executable location
-		if root := searchUpward(execDir); root != "" {
-			return root
-		}
+	// Parse command
+	cmd := remainingArgs[0]
+	args := []string{}
+	if len(remainingArgs) > 1 {
+		args = remainingArgs[1:]
 	}
 
-	return ""
-}
+	// Handle subcommands
+	switch cmd {
+	case "help", "-h", "--help":
+		printHelp()
 
-// isProjectRoot checks if a directory is the project root
-func isProjectRoot(dir string) bool {
-	scriptPath := filepath.Join(dir, "scripts", "start.sh")
-	_, err := os.Stat(scriptPath)
-	return err == nil
-}
+	case "version", "-v", "--version":
+		fmt.Printf("tmuxcoder v%s\n", version)
 
-// searchUpward searches for project root by going up the directory tree
-func searchUpward(startDir string) string {
-	dir := startDir
-	for {
-		if isProjectRoot(dir) {
-			return dir
+	case "list", "ls":
+		if err := app.ListSessions(); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
 
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			// Reached filesystem root
-			return ""
+	case "new", "start":
+		if err := app.CreateSession(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
 		}
-		dir = parent
+
+	case "attach", "a":
+		if err := app.AttachSession(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "stop", "kill":
+		if err := app.StopSession(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "status", "st":
+		if err := app.ShowStatus(args); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	case "layout":
+		if len(args) < 1 {
+			fmt.Fprintf(os.Stderr, "Error: layout command expects: tmuxcoder layout <session> [layout.yaml]\n")
+			os.Exit(1)
+		}
+		sessionName := args[0]
+		layoutPath := ""
+		if len(args) > 1 {
+			layoutPath = args[1]
+		}
+		if err := app.ReloadLayout(sessionName, layoutPath); err != nil {
+			fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+			os.Exit(1)
+		}
+
+	default:
+		// If first arg looks like a session name (no dashes), treat as smart start
+		if cmd[0] != '-' {
+			if err := app.SmartStart(cmd); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		} else {
+			// Pass through to opencode-tmux for legacy flags
+			if err := app.PassThrough(remainingArgs); err != nil {
+				fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+				os.Exit(1)
+			}
+		}
 	}
 }
 
 func printHelp() {
-	help := `tmuxcoder - AI-powered coding orchestrator with tmux
+	help := `tmuxcoder - Zero-config AI coding orchestrator
 
 USAGE:
-    tmuxcoder [OPTIONS]
+    tmuxcoder [GLOBAL OPTIONS] [COMMAND] [OPTIONS]
 
-OPTIONS:
-    -h, --help           Show this help message
-    -v, --version        Show version information
-    --skip-build         Skip the Go build step
-    --server <URL>       Set OPENCODE_SERVER (default auto-start on 127.0.0.1:55306)
-    --attach-only        Attach to existing tmux session only
-    -- <args>            Pass additional arguments to opencode-tmux
+GLOBAL OPTIONS:
+    --layout <path>         Override layout config (sets OPENCODE_TMUX_CONFIG)
+
+COMMANDS:
+    (no command)           Smart start - auto-detect session and attach
+    <session-name>         Start or attach to named session
+    attach <name>          Attach to existing session (alias: a)
+    layout <name> [file]   Reload layout for session without attaching
+    stop <name> [--cleanup|-c]
+                           Stop session daemon (alias: kill)
+                           --cleanup: Also kill tmux session
+    list                   List all sessions (alias: ls)
+    status [name]          Show session status (alias: st)
+    help                   Show this help
+    version                Show version
 
 EXAMPLES:
-    # Start tmuxcoder (from project directory)
-    cd /path/to/TmuxCoder
+    # Zero-config startup (auto-detects session name from directory)
     tmuxcoder
 
-    # Or set TMUXCODER_ROOT to run from anywhere
-    export TMUXCODER_ROOT=/path/to/TmuxCoder
-    tmuxcoder
+    # Start/attach to specific session
+    tmuxcoder myproject
 
-    # Skip build step if binaries already exist
-    tmuxcoder --skip-build
+    # List all sessions
+    tmuxcoder list
 
-    # Attach to existing session without rebuilding
-    tmuxcoder --attach-only
+    # Stop daemon only (tmux session remains)
+    tmuxcoder stop myproject
 
-    # Use custom server
-    tmuxcoder --server http://localhost:8080
+    # Stop daemon and destroy tmux session
+    tmuxcoder stop myproject --cleanup
+
+    # Show status
+    tmuxcoder status
+
+BEHAVIOR:
+    - Automatically creates tmux session if it doesn't exist
+    - Automatically starts daemon in background
+    - Automatically attaches to session
+    - Auto-detects session name from current directory
+    - Reuses existing sessions intelligently
 
 ENVIRONMENT VARIABLES:
-    TMUXCODER_ROOT            Path to TmuxCoder project directory
+    TMUXCODER_ROOT            Project root directory
     OPENCODE_SERVER           OpenCode API server URL
-    OPENCODE_SOCKET           IPC socket path (default: ~/.opencode/ipc.sock)
-    OPENCODE_STATE            State file path (default: ~/.opencode/state.json)
-    OPENCODE_TMUX_CONFIG      Config file path (default: ~/.opencode/tmux.yaml)
-    OPENCODE_AUTO_SERVER_PORT Auto-start server port (default: 55306)
+    OPENCODE_TMUX_CONFIG      Config file (default: ~/.opencode/tmux.yaml)
 
-For more information, visit: https://github.com/yourusername/TmuxCoder
 `
 	fmt.Print(help)
+}
+
+type globalOptions struct {
+	layoutPath string
+	serverURL  string
+}
+
+func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
+	opts := globalOptions{}
+	remaining := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		if arg == "--" {
+			remaining = append(remaining, args[i:]...)
+			break
+		}
+
+		if arg == "--layout" || strings.HasPrefix(arg, "--layout=") {
+			value := ""
+			if arg == "--layout" {
+				if i+1 >= len(args) {
+					return nil, opts, fmt.Errorf("--layout requires a file path")
+				}
+				value = args[i+1]
+				i++
+			} else {
+				value = strings.TrimPrefix(arg, "--layout=")
+			}
+
+			if value == "" {
+				return nil, opts, fmt.Errorf("--layout requires a file path")
+			}
+
+			opts.layoutPath = value
+			continue
+		}
+
+		if arg == "--server" || strings.HasPrefix(arg, "--server=") {
+			value := ""
+			if arg == "--server" {
+				if i+1 >= len(args) {
+					return nil, opts, fmt.Errorf("--server requires a URL")
+				}
+				value = args[i+1]
+				i++
+			} else {
+				value = strings.TrimPrefix(arg, "--server=")
+			}
+
+			if value == "" {
+				return nil, opts, fmt.Errorf("--server requires a URL")
+			}
+
+			opts.serverURL = value
+			continue
+		}
+
+		remaining = append(remaining, arg)
+	}
+
+	return remaining, opts, nil
+}
+
+func applyGlobalOptions(opts globalOptions) error {
+	if opts.layoutPath == "" {
+		_ = os.Unsetenv("TMUXCODER_LAYOUT_OVERRIDE_PATH")
+	} else {
+		resolved, err := resolvePath(opts.layoutPath)
+		if err != nil {
+			return fmt.Errorf("invalid layout path: %w", err)
+		}
+
+		if _, err := os.Stat(resolved); err != nil {
+			return fmt.Errorf("layout file not accessible: %w", err)
+		}
+
+		if err := os.Setenv("OPENCODE_TMUX_CONFIG", resolved); err != nil {
+			return fmt.Errorf("failed to set OPENCODE_TMUX_CONFIG: %w", err)
+		}
+		if err := os.Setenv("TMUXCODER_LAYOUT_OVERRIDE_PATH", resolved); err != nil {
+			return fmt.Errorf("failed to propagate layout override: %w", err)
+		}
+
+		fmt.Printf("Using layout config: %s\n", resolved)
+	}
+
+	if opts.serverURL != "" {
+		if err := os.Setenv("OPENCODE_SERVER", opts.serverURL); err != nil {
+			return fmt.Errorf("failed to set OPENCODE_SERVER: %w", err)
+		}
+		fmt.Printf("Using OpenCode server: %s\n", opts.serverURL)
+	}
+
+	return nil
+}
+
+func resolvePath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path cannot be empty")
+	}
+
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = home
+	} else if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return "", err
+		}
+		path = filepath.Join(home, path[2:])
+	}
+
+	if !filepath.IsAbs(path) {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			return "", err
+		}
+		path = abs
+	}
+
+	return path, nil
 }

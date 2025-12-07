@@ -318,16 +318,26 @@ func (client *SocketClient) SendClearSessionMessages(sessionID string) error {
 
 // SendOrchestratorCommand sends a control command to the orchestrator and waits for the result.
 func (client *SocketClient) SendOrchestratorCommand(command string) error {
+	return client.SendOrchestratorCommandWithParams(command, nil)
+}
+
+// SendOrchestratorCommandWithParams sends a control command with optional parameters.
+func (client *SocketClient) SendOrchestratorCommandWithParams(command string, params map[string]interface{}) error {
 	command = strings.TrimSpace(command)
 	if command == "" {
 		return fmt.Errorf("command cannot be empty")
 	}
 
+	payload := map[string]interface{}{
+		"command": command,
+	}
+	if len(params) > 0 {
+		payload["params"] = params
+	}
+
 	message := IPCMessage{
-		Type: "orchestrator_command",
-		Data: map[string]interface{}{
-			"command": command,
-		},
+		Type:      "orchestrator_command",
+		Data:      payload,
 		Timestamp: time.Now(),
 	}
 

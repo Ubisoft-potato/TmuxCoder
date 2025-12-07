@@ -18,25 +18,25 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check if running as root
 if [[ $EUID -eq 0 ]]; then
-   echo -e "${RED}Error: Do not run this script as root${NC}"
+   echo  "${RED}Error: Do not run this script as root${NC}"
    exit 1
 fi
 
 # Print colored output
 print_step() {
-    echo -e "${BLUE}==>${NC} ${GREEN}$1${NC}"
+    echo  "${BLUE}==>${NC} ${GREEN}$1${NC}"
 }
 
 print_warning() {
-    echo -e "${YELLOW}Warning:${NC} $1"
+    echo  "${YELLOW}Warning:${NC} $1"
 }
 
 print_error() {
-    echo -e "${RED}Error:${NC} $1"
+    echo  "${RED}Error:${NC} $1"
 }
 
 print_success() {
-    echo -e "${GREEN}✓${NC} $1"
+    echo  "${GREEN}✓${NC} $1"
 }
 
 # Check dependencies
@@ -194,7 +194,7 @@ install_binary() {
                 print_warning "~/bin is not in your PATH"
                 echo ""
                 echo "Add this to your ~/.bashrc or ~/.zshrc:"
-                echo -e "  ${BLUE}export PATH=\"\$HOME/bin:\$PATH\"${NC}"
+                echo  "  ${BLUE}export PATH=\"\$HOME/bin:\$PATH\"${NC}"
                 echo ""
             fi
             ;;
@@ -246,20 +246,20 @@ EOF
 # Print next steps
 print_next_steps() {
     echo ""
-    echo -e "${GREEN}======================================${NC}"
-    echo -e "${GREEN}Installation Complete!${NC}"
-    echo -e "${GREEN}======================================${NC}"
+    echo  "${GREEN}======================================${NC}"
+    echo  "${GREEN}Installation Complete!${NC}"
+    echo  "${GREEN}======================================${NC}"
     echo ""
     echo "Next steps:"
     echo ""
     echo "1. Start tmuxcoder:"
-    echo -e "   ${BLUE}./tmuxcoder${NC}"
+    echo  "   ${BLUE}./tmuxcoder${NC}"
     echo ""
     echo "2. Or use the start script directly:"
-    echo -e "   ${BLUE}./scripts/start.sh${NC}"
+    echo  "   ${BLUE}./scripts/start.sh${NC}"
     echo ""
     echo "3. View help:"
-    echo -e "   ${BLUE}tmuxcoder --help${NC}"
+    echo  "   ${BLUE}tmuxcoder --help${NC}"
     echo ""
     echo "Configuration:"
     echo "  - Config: ~/.opencode/tmux.yaml"
@@ -273,9 +273,9 @@ print_next_steps() {
 # Main installation flow
 main() {
     echo ""
-    echo -e "${GREEN}╔═══════════════════════════════════╗${NC}"
-    echo -e "${GREEN}║   TmuxCoder Installation Script  ║${NC}"
-    echo -e "${GREEN}╚═══════════════════════════════════╝${NC}"
+    echo  "${GREEN}╔═══════════════════════════════════╗${NC}"
+    echo  "${GREEN}║   TmuxCoder Installation Script  ║${NC}"
+    echo  "${GREEN}╚═══════════════════════════════════╝${NC}"
     echo ""
 
     check_dependencies

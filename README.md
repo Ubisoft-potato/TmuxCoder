@@ -35,235 +35,76 @@ Built for developers who want a terminal-native AI coding assistant without leav
 
 _Coming soon - add screenshots showing the three-pane layout in action_
 
-## Architecture
+## Quickstart
 
-![Architecture Diagram](docs/architecture.svg)
+### 1. Check Requirements
 
-**Key Components:**
+- macOS or Linux with tmux ≥ 3.2
+- Go 1.24+ (for building binaries)
+- `bun` (auto-start OpenCode server)
+- OpenCode-compatible API access
 
-- **Orchestrator** ([cmd/opencode-tmux/main.go](cmd/opencode-tmux/main.go)) – Session manager, process supervisor
-- **Panels** ([internal/panels/](internal/panels/)) – Bubble Tea TUIs (sessions, messages, input)
-- **IPC** ([internal/ipc](internal/ipc)) – Unix socket with message framing
-- **State** ([internal/state](internal/state), [internal/persistence](internal/persistence)) – Event bus + JSON persistence
-- **Config** ([internal/config](internal/config), [internal/theme](internal/theme)) – YAML loader + theme registry
-
-**Tech Stack:** Go 1.24+, tmux ≥ 3.2, Bubble Tea, Lip Gloss, OpenCode SDK
-
-## Requirements
-
-- macOS or Linux
-- tmux ≥ 3.2
-- Go 1.24+
-- Bash, sed, awk (for start script)
-- OpenCode-compatible API server
-
-## Installation
-
-### Quick Install (Recommended)
-
-Run the automated installation script:
+### 2. Install Once
 
 ```bash
 git clone https://github.com/Ubisoft-potato/TmuxCoder
 cd TmuxCoder
-./install.sh
+./install.sh          # builds binaries and installs the tmuxcoder CLI
 ```
 
-This will:
-- Check all dependencies (Go, tmux, bun)
-- Setup the opencode submodule
-- Build all binaries
-- Install `tmuxcoder` command to your system
-- Create default configuration
+### 3. Launch the Workspace
 
-### One-Command Launch
+Run `tmuxcoder` from any project directory. The CLI:
+1. Builds binaries if needed
+2. Starts or reuses the OpenCode server
+3. Creates/attaches to the tmux session with three panes (sessions, messages, input)
 
-After installation, start TmuxCoder with a single command:
+Detach with the normal tmux shortcut (`Ctrl-b d`) and re-run `tmuxcoder` to jump back in.
 
-```bash
-tmuxcoder           # If installed to system/user bin
-# OR
-./tmuxcoder         # Run from project directory
-```
+### 4. Handy Commands
 
-> **Note:** This project includes [opencode](https://github.com/sst/opencode) as a git submodule in `packages/opencode/`. The submodule provides the OpenCode server and SDK.
+| Command | What it does |
+|---------|--------------|
+| `tmuxcoder list` | Show managed sessions (no server start needed) |
+| `tmuxcoder status <name>` | Inspect tmux/daemon status |
+| `tmuxcoder <name>` | Create or attach to a named session |
+| `tmuxcoder attach <name>` | Attach without rebuilding |
+| `tmuxcoder stop <name>` | Stop daemon only |
+| `tmuxcoder stop <name> --cleanup` | Stop daemon and kill tmux session |
 
+Use `tmuxcoder --server http://host:port` to point at an existing OpenCode deployment, or export `OPENCODE_SERVER` in your shell.
 
-This will:
-1. Check and install OpenCode dependencies (with progress display)
-2. Auto-build binaries if needed
-3. Setup and start the OpenCode server
-4. Create/attach to a tmux session with the TUI interface
+### 5. Customize Layout & Config
 
-**Environment variables (optional):**
+- `tmuxcoder layout <session> [path/to/layout.yaml]` reloads the layout for a **running** session without attaching (defaults to `~/.opencode/tmux.yaml` when the path is omitted). Example:
 
-```bash
-export OPENCODE_SERVER="http://127.0.0.1:62435"
-export OPENCODE_SOCKET="${HOME}/.opencode/ipc.sock"       # optional
-export OPENCODE_STATE="${HOME}/.opencode/state.json"      # optional
-export OPENCODE_TMUX_CONFIG="${HOME}/.opencode/tmux.yaml" # optional
-```
+  ```bash
+  tmuxcoder layout my-session ~/.opencode/tests/test-tmux.yaml
+  ```
 
-**2. Create layout config** (optional, defaults provided) at `~/.opencode/tmux.yaml`:
-The installation script creates a default config. You can customize it:
+- Environment variables:
 
-```yaml
-version: "1.0"
-mode: raw
-session:
-  name: tmux-coder
-panels:
-  - id: sessions
-    type: sessions
-    width: "22%"
-  - id: messages
-    type: messages
-  - id: input
-    type: input
-    height: "25%"
-splits:
-  - type: horizontal
-    target: root
-    panels: ["sessions", "messages"]
-    ratio: "1:2"
-  - type: vertical
-    target: messages
-    panels: ["messages", "input"]
-    ratio: "3:1"
-```
+  | Variable | Default | Description |
+  |----------|---------|-------------|
+  | `OPENCODE_SERVER` | auto-started `http://127.0.0.1:55306` | OpenCode API base URL |
+  | `OPENCODE_SOCKET` | `${HOME}/.opencode/ipc.sock` | IPC socket |
+  | `OPENCODE_STATE` | `${HOME}/.opencode/state.json` | Persisted shared state |
+  | `OPENCODE_TMUX_CONFIG` | `${HOME}/.opencode/tmux.yaml` | Layout/session YAML |
 
-**Alternative: Use the start script directly**
+Need the full architecture story later? See [docs/TMUX_ARCHITECTURE.md](docs/TMUX_ARCHITECTURE.md).
 
-```bash
-./scripts/start.sh
-```
+### 6. Logs, State & Troubleshooting
 
-## Usage
+- Panel + orchestrator logs: `~/.opencode/*.log`
+- State snapshots: `~/.opencode/states/<session>.json`
+- Quick fixes:
+  - IPC errors? Remove stale socket `rm ~/.opencode/ipc.sock`
+  - YAML mistakes? `yamllint ~/.opencode/tmux.yaml`
 
-**CLI Commands:**
+Common symptoms:
 
-```bash
-# Start tmuxcoder (auto-build if needed)
-tmuxcoder
+- **Panels not starting** – inspect `~/.opencode/tmux-<session>.log`
+- **Layout ignored** – double-check `OPENCODE_TMUX_CONFIG` and re-run with `--layout`
+- **State not saving** – verify disk permissions and free space
 
-# Show help
-tmuxcoder --help
-
-# Show version
-tmuxcoder --version
-
-# Skip build step (faster if binaries exist)
-tmuxcoder --skip-build
-
-# Attach to existing session only
-tmuxcoder --attach-only
-
-# Use custom server
-tmuxcoder --server http://localhost:8080
-
-# Pass additional arguments to opencode-tmux
-tmuxcoder -- --reload-layout
-```
-
-**Direct binary flags:**
-
-```bash
-./cmd/opencode-tmux/dist/opencode-tmux --reuse-session       # Reuse existing session
-./cmd/opencode-tmux/dist/opencode-tmux --force-new-session   # Force new session
-./cmd/opencode-tmux/dist/opencode-tmux --reload-layout       # Reload layout
-```
-
-**Default layout:**
-
-- **Left pane** – Session browser (`opencode-sessions`)
-- **Top-right** – Message history with markdown rendering (`opencode-messages`)
-- **Bottom-right** – Command input (`opencode-input`)
-
-**Logs & state:**
-
-- Panel logs: `~/.opencode/*.log`
-- Shared state: `~/.opencode/state.json` (auto-saved every few seconds)
-- The orchestrator auto-restarts failed panels
-
-## Configuration
-
-### Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `OPENCODE_SERVER` | _(required)_ | Base URL for the OpenCode API used by the orchestrator and panels. |
-| `OPENCODE_SOCKET` | `${HOME}/.opencode/ipc.sock` | Path to the Unix domain socket for IPC between orchestrator and panels. |
-| `OPENCODE_STATE` | `${HOME}/.opencode/state.json` | Location of persisted shared state (sessions, messages, theme). |
-| `OPENCODE_TMUX_CONFIG` | `${HOME}/.opencode/tmux.yaml` | YAML file containing session + layout definitions. |
-
-### Layout YAML
-
-Key fields:
-
-- `version` – Config schema version (default: `1.0`)
-- `session.name` – tmux session name
-- `mode` – Layout strategy (`raw` applies splits as-is)
-- `panels` – Panel definitions with `id`, `type`, `width`, `height`, `command`
-- `splits` – Split operations with `ratio` (e.g., `"1:2"`)
-
-**Hot-reload changes:**
-
-```bash
-./scripts/start.sh --reload-layout
-```
-
-## Troubleshooting
-
-**Issue: Panels not starting**
-- Check `~/.opencode/*.log` for panel-specific errors
-- Verify `OPENCODE_SERVER` is accessible: `curl $OPENCODE_SERVER`
-- Ensure tmux version: `tmux -V` (need ≥ 3.2)
-
-**Issue: IPC connection failures**
-- Check socket path: `ls -l ~/.opencode/ipc.sock`
-- Kill stale socket: `rm ~/.opencode/ipc.sock` and restart
-- Look for "connection refused" in orchestrator logs
-
-**Issue: Layout not applying**
-- Validate YAML syntax: `yamllint ~/.opencode/tmux.yaml`
-- Check config path matches `OPENCODE_TMUX_CONFIG`
-- Use `--reload-layout` flag after edits
-
-**Issue: State not persisting**
-- Verify write permissions: `ls -la ~/.opencode/state.json`
-- Check for disk space: `df -h ~`
-- Review autosave logs in `~/.opencode/opencode-tmux.log`
-
-## Contributing
-
-Contributions are welcome! Please:
-
-1. Fork the repository
-2. Create a feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-
-**Before submitting:**
-- Run tests: `go test ./...`
-- Format code: `go fmt ./...`
-- Update docs if adding features
-
-## License
-
-MIT License - see [LICENSE](LICENSE) file for details.
-
-## Project Status
-
-Active development. The core orchestration and panel system is stable. Upcoming work includes:
-- [ ] Plugin system for custom panels
-- [ ] Better error recovery
-- [ ] Windows/WSL support
-- [ ] Configuration UI
-
----
-
-For implementation details, see:
-- Orchestrator: [cmd/opencode-tmux/main.go](cmd/opencode-tmux/main.go)
-- Panels: [internal/panels/](internal/panels/)
-- IPC: [internal/ipc](internal/ipc)
+If everything looks stuck, run `tmuxcoder stop <name> --cleanup`, then `tmuxcoder` again for a clean slate.

@@ -14,36 +14,39 @@ import (
 	"time"
 
 	"github.com/opencode/tmux_coder/internal/interfaces"
+	"github.com/opencode/tmux_coder/internal/permission"
 	"github.com/opencode/tmux_coder/internal/types"
 )
 
 // SocketServer manages Unix Domain Socket server for inter-panel communication
 type SocketServer struct {
-	socketPath     string
-	listener       net.Listener
-	connections    map[string]*ClientConnection
-	connectionsMux sync.RWMutex
-	eventBus       interfaces.EventBus
-	stateManager   interfaces.StateManager
-	control        interfaces.OrchestratorControl
-	ctx            context.Context
-	cancel         context.CancelFunc
-	isRunning      bool
-	runningMux     sync.RWMutex
+	socketPath        string
+	listener          net.Listener
+	connections       map[string]*ClientConnection
+	connectionsMux    sync.RWMutex
+	eventBus          interfaces.EventBus
+	stateManager      interfaces.StateManager
+	control           interfaces.OrchestratorControl
+	permissionChecker *permission.Checker
+	ctx               context.Context
+	cancel            context.CancelFunc
+	isRunning         bool
+	runningMux        sync.RWMutex
 }
 
 // ClientConnection represents a connected panel client
 type ClientConnection struct {
-	ID           string        `json:"id"`
-	PanelType    string        `json:"panel_type"`
-	PanelID      string        `json:"panel_id"`
-	Conn         net.Conn      `json:"-"`
-	ConnectedAt  time.Time     `json:"connected_at"`
-	LastSeen     time.Time     `json:"last_seen"`
-	MessageCount int64         `json:"message_count"`
-	encoder      *json.Encoder `json:"-"`
-	decoder      *json.Decoder `json:"-"`
-	sendMutex    sync.Mutex    // To synchronize writes to the connection
+	ID           string                   `json:"id"`
+	PanelType    string                   `json:"panel_type"`
+	PanelID      string                   `json:"panel_id"`
+	Conn         net.Conn                 `json:"-"`
+	ConnectedAt  time.Time                `json:"connected_at"`
+	LastSeen     time.Time                `json:"last_seen"`
+	MessageCount int64                    `json:"message_count"`
+	Requester    *interfaces.IpcRequester `json:"requester,omitempty"` // Client credentials
+	encoder      *json.Encoder            `json:"-"`
+	decoder      *json.Decoder            `json:"-"`
+	sendMutex    sync.Mutex               // To synchronize writes to the connection
 }
 
 // send safely writes a message to the client connection.
@@ -77,6 +80,11 @@ func NewSocketServer(socketPath string, eventBus interfaces.EventBus, stateManag
 	}
 }
 
+// SetPermissionChecker sets the permission checker for the server
+func (server *SocketServer) SetPermissionChecker(checker *permission.Checker) {
+	server.permissionChecker = checker
+}
+
 // Start begins listening for client connections
 func (server *SocketServer) Start() error {
 	server.runningMux.Lock()
@@ -101,6 +109,13 @@ func (server *SocketServer) Start() error {
 	listener, err := net.Listen("unix", server.socketPath)
 	if err != nil {
 		return fmt.Errorf("failed to listen on socket: %w", err)
+	}
+
+	// Set socket permissions to allow group/other users to connect
+	// Application-level permission checking will enforce access control
+	if err := os.Chmod(server.socketPath, 0666); err != nil {
+		listener.Close()
+		return fmt.Errorf("failed to set socket permissions: %w", err)
 	}
 
 	server.listener = listener
@@ -206,6 +221,15 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 		return
 	}
 
+	// Extract requester credentials
+	requester, err := GetRequesterFromConn(conn)
+	if err != nil {
+		log.Printf("Warning: failed to extract peer credentials: %v", err)
+		// Continue without credentials for backward compatibility
+	} else {
+		log.Printf("Connection from user %s (UID=%d, GID=%d)", requester.Username, requester.UID, requester.GID)
+	}
+
 	// Create client connection object
 	clientConn := &ClientConnection{
 		ID:          fmt.Sprintf("%s-%d", handshake.PanelID, time.Now().UnixNano()),
@@ -214,6 +238,7 @@ func (server *SocketServer) handleConnection(conn net.Conn) {
 		Conn:        conn,
 		ConnectedAt: time.Now(),
 		LastSeen:    time.Now(),
+		Requester:   requester,
 		encoder:     encoder,
 		decoder:     decoder,
 	}
@@ -516,31 +541,173 @@ func (server *SocketServer) handleOrchestratorCommand(clientConn *ClientConnecti
 	}
 
 	var payload struct {
-		Command string `json:"command"`
+		Command string                 `json:"command"`
+		Params  map[string]interface{} `json:"params"`
 	}
 	if err := mapToStruct(message.Data, &payload); err != nil || strings.TrimSpace(payload.Command) == "" {
 		server.sendErrorMessage(clientConn, "orchestrator_command_response", "invalid command payload", message.RequestID)
 		return
 	}
 
-	switch strings.ToLower(payload.Command) {
+	cmdLower := strings.ToLower(payload.Command)
+
+	// Map command to permission operation
+	var operation permission.Operation
+	switch cmdLower {
 	case "reload_layout":
-		if err := server.control.ReloadLayout(); err != nil {
-			log.Printf("Reload layout command failed: %v", err)
-			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
-			return
-		}
+		operation = permission.OperationReloadLayout
+	case "shutdown", "shutdown:cleanup":
+		operation = permission.OperationShutdown
+	case "get_status":
+		operation = permission.OperationGetStatus
+	case "get_clients":
+		operation = permission.OperationGetClients
+	case "ping":
+		// Ping doesn't need permission check
+		operation = ""
 	default:
 		server.sendErrorMessage(clientConn, "orchestrator_command_response", "unsupported command", message.RequestID)
 		return
 	}
 
+	// Check permissions (skip for ping)
+	if operation != "" && server.permissionChecker != nil {
+		if err := server.permissionChecker.CheckPermission(operation, clientConn.Requester); err != nil {
+			log.Printf("Permission denied for %s from %v: %v", cmdLower, clientConn.Requester, err)
+			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
+			return
+		}
+	}
+
+	// Execute command
+	switch cmdLower {
+	case "reload_layout":
+		var configPath string
+		if payload.Params != nil {
+			if val, ok := payload.Params["config_path"]; ok {
+				if pathStr, ok2 := val.(string); ok2 {
+					configPath = strings.TrimSpace(pathStr)
+				}
+			}
+		}
+		if err := server.control.ReloadLayout(configPath); err != nil {
+			log.Printf("Reload layout command failed: %v", err)
+			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
+			return
+		}
+
+	case "shutdown", "shutdown:cleanup":
+		// Extract cleanup parameter from command suffix or params
+		cleanup := false
+		if strings.HasSuffix(cmdLower, ":cleanup") {
+			cleanup = true
+		} else if payload.Params != nil {
+			if c, ok := payload.Params["cleanup"].(bool); ok {
+				cleanup = c
+			}
+		}
+
+		log.Printf("Shutdown command received (cleanup=%v)", cleanup)
+
+		// Send success response before shutting down
+		response := IPCMessage{
+			Type:      "orchestrator_command_response",
+			RequestID: message.RequestID,
+			Data: map[string]interface{}{
+				"success": true,
+				"command": "shutdown",
+				"cleanup": cleanup,
+			},
+			Timestamp: time.Now(),
+		}
+		if err := clientConn.send(response); err != nil {
+			log.Printf("Failed to send shutdown response: %v", err)
+		}
+
+		// Trigger shutdown asynchronously to allow response to be sent
+		go func() {
+			time.Sleep(100 * time.Millisecond) // Give time for response to be sent
+			if err := server.control.Shutdown(cleanup); err != nil {
+				log.Printf("Shutdown command failed: %v", err)
+			}
+		}()
+		return
+
+	case "get_status":
+		status, err := server.control.GetStatus()
+		if err != nil {
+			log.Printf("Get status command failed: %v", err)
+			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
+			return
+		}
+
+		response := IPCMessage{
+			Type:      "orchestrator_command_response",
+			RequestID: message.RequestID,
+			Data: map[string]interface{}{
+				"success": true,
+				"command": "get_status",
+				"status":  status,
+			},
+			Timestamp: time.Now(),
+		}
+		if err := clientConn.send(response); err != nil {
+			log.Printf("Failed to send get_status response: %v", err)
+		}
+		return
+
+	case "get_clients":
+		clients, err := server.control.GetConnectedClients()
+		if err != nil {
+			log.Printf("Get clients command failed: %v", err)
+			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
+			return
+		}
+
+		response := IPCMessage{
+			Type:      "orchestrator_command_response",
+			RequestID: message.RequestID,
+			Data: map[string]interface{}{
+				"success": true,
+				"command": "get_clients",
+				"clients": clients,
+			},
+			Timestamp: time.Now(),
+		}
+		if err := clientConn.send(response); err != nil {
+			log.Printf("Failed to send get_clients response: %v", err)
+		}
+		return
+
+	case "ping":
+		if err := server.control.Ping(); err != nil {
+			log.Printf("Ping command failed: %v", err)
+			server.sendErrorMessage(clientConn, "orchestrator_command_response", err.Error(), message.RequestID)
+			return
+		}
+
+		response := IPCMessage{
+			Type:      "orchestrator_command_response",
+			RequestID: message.RequestID,
+			Data: map[string]interface{}{
+				"success": true,
+				"command": "ping",
+			},
+			Timestamp: time.Now(),
+		}
+		if err := clientConn.send(response); err != nil {
+			log.Printf("Failed to send ping response: %v", err)
+		}
+		return
+	}
+
+	// Default success response for reload_layout
 	response := IPCMessage{
 		Type:      "orchestrator_command_response",
 		RequestID: message.RequestID,
 		Data: map[string]interface{}{
 			"success": true,
-			"command": strings.ToLower(payload.Command),
+			"command": cmdLower,
 		},
 		Timestamp: time.Now(),
 	}
@@ -582,4 +749,12 @@ func (server *SocketServer) IsRunning() bool {
 	server.runningMux.RLock()
 	defer server.runningMux.RUnlock()
 	return server.isRunning
+}
+
+// ConnectionCount returns the number of active IPC connections
+// This method is thread-safe and can be called concurrently
+func (server *SocketServer) ConnectionCount() int {
+	server.connectionsMux.RLock()
+	defer server.connectionsMux.RUnlock()
+	return len(server.connections)
 }

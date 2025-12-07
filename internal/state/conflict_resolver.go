@@ -12,13 +12,13 @@ import (
 
 // ConflictResolver handles state synchronization conflicts using various strategies
 type ConflictResolver struct {
-	maxRetries        int
-	baseBackoffMs     int
-	maxBackoffMs      int
-	conflictStrategy  interfaces.ConflictStrategy
-	retryCount        int64
-	successCount      int64
-	conflictCount     int64
+	maxRetries       int
+	baseBackoffMs    int
+	maxBackoffMs     int
+	conflictStrategy interfaces.ConflictStrategy
+	retryCount       int64
+	successCount     int64
+	conflictCount    int64
 }
 
 // NewConflictResolver creates a new conflict resolver with specified parameters
@@ -34,10 +34,10 @@ func NewConflictResolver(maxRetries, baseBackoffMs, maxBackoffMs int, strategy i
 // DefaultConflictResolver creates a resolver with sensible defaults
 func DefaultConflictResolver() *ConflictResolver {
 	return NewConflictResolver(
-		5,                              // max 5 retries
-		10,                             // 10ms base backoff
-		1000,                           // 1s max backoff
-		interfaces.LastWriteWins,       // use timestamp-based resolution
+		5,                        // max 5 retries
+		10,                       // 10ms base backoff
+		1000,                     // 1s max backoff
+		interfaces.LastWriteWins, // use timestamp-based resolution
 	)
 }
 

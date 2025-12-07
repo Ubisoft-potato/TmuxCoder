@@ -1,0 +1,102 @@
+# TmuxCoder Complete Configuration Example
+# Stage 6 Added Features Configuration
+
+# Session configuration
+session:
+  name: my-coding-session
+  window_name: coding
+
+# Panel configuration
+panels:
+  - id: sessions
+    type: sessions
+    size: 60%
+    application: opencode-sessions
+
+  - id: messages
+    type: messages
+    size: 20%
+    application: opencode-messages
+
+  - id: input
+    type: input
+    size: 20%
+    application: opencode-input
+
+# ====== Stage 6 New Configuration ======
+
+# Process supervision configuration
+supervision:
+  # Enable supervision
+  enabled: true
+
+  # Health check interval (must be >= 1s)
+  health_check_interval: 2s
+
+  # Initial restart delay
+  restart_delay: 1s
+
+  # Max restart delay (exponential backoff)
+  max_restart_delay: 30s
+
+  # Auto shutdown when all clients disconnect (default false)
+  auto_shutdown_when_empty: false
+
+  # Auto shutdown timeout (requires auto_shutdown_when_empty = true)
+  # 0 means immediate; otherwise waits for the specified duration
+  auto_shutdown_timeout: 5m
+
+# IPC configuration
+ipc:
+  # Socket directory
+  socket_dir: /tmp/opencode-tmux
+
+  # Socket permissions (octal string)
+  socket_mode: "0600"
+
+  # IPC operation timeout
+  timeout: 10s
+
+# Permission control
+permissions:
+  # Who can shut down the daemon
+  # Allowed values: owner (session owner), group (group members), any (any user)
+  shutdown: owner
+
+  # Who can reload layout
+  reload_layout: owner
+
+  # Who can view status
+  status: any
+
+  # Optional: whitelist of UIDs
+  # Empty means whitelist disabled
+  allowed_uids: []
+    # - 1000
+    # - 1001
+
+# ====== Usage ======
+#
+# 1. Basic usage:
+#    opencode-tmux start my-session --config /path/to/this/file.yaml
+#
+# 2. Supervision features:
+#    - Automatically detects dead panels and restarts
+#    - Detects zombie processes
+#    - Validates if environment variables are stale
+#
+# 3. Orphaned session recovery:
+#    If the daemon crashes, the tmux session remains
+#    Use the following command to recover:
+#    opencode-tmux start my-session --reuse
+#
+# 4. Client protection:
+#    opencode-tmux stop my-session --check-clients
+#    # Refuses to stop if clients are still connected
+#
+# 5. Force stop:
+#    opencode-tmux stop my-session --force --cleanup
+#
+# 6. View status:
+#    opencode-tmux status my-session
+#    opencode-tmux status my-session --json  # JSON output

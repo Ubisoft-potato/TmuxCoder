@@ -14,11 +14,11 @@ const (
 )
 
 var (
-	NormalBorder   = lipgloss.NormalBorder()
-	RoundedBorder  = lipgloss.RoundedBorder()
-	DoubleBorder   = lipgloss.DoubleBorder()
-	ThickBorder    = lipgloss.ThickBorder()
-	HiddenBorder   = lipgloss.HiddenBorder()
+	NormalBorder  = lipgloss.NormalBorder()
+	RoundedBorder = lipgloss.RoundedBorder()
+	DoubleBorder  = lipgloss.DoubleBorder()
+	ThickBorder   = lipgloss.ThickBorder()
+	HiddenBorder  = lipgloss.HiddenBorder()
 )
 
 func WhitespaceStyle(bg compat.AdaptiveColor) lipgloss.WhitespaceOption {

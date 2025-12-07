@@ -1,0 +1,28 @@
+# Test Configuration for TmuxCoder
+# Used for Stage 0 baseline testing and future development
+
+session:
+  name: test-session
+  window_name: test-window
+
+panels:
+  - id: sessions
+    type: sessions
+    size: 60%
+    application: opencode-sessions
+
+  - id: messages
+    type: messages
+    size: 20%
+    application: opencode-messages
+
+  - id: input
+    type: input
+    size: 20%
+    application: opencode-input
+
+# Test-specific settings
+test:
+  # Use shorter timeouts for faster testing
+  startup_timeout: 5s
+  health_check_interval: 1s

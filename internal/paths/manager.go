@@ -17,9 +17,16 @@ type PathManager struct {
 
 // NewPathManager creates a new path manager
 func NewPathManager(sessionName string) *PathManager {
+	// Use ~/.opencode instead of temp directory for better multi-user support
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		// Fallback to temp dir if home dir is not available
+		homeDir = os.TempDir()
+	}
+
 	return &PathManager{
 		sessionName: sessionName,
-		baseDir:     filepath.Join(os.TempDir(), "opencode-tmux"),
+		baseDir:     filepath.Join(homeDir, ".opencode"),
 	}
 }
 
@@ -63,8 +70,17 @@ func (p *PathManager) EnsureDirectories() error {
 	}
 
 	for _, dir := range dirs {
+		// Use 0755 for base directory creation
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			return fmt.Errorf("failed to create directory %s: %w", dir, err)
+		}
+
+		// For sockets directory, ensure it's accessible to all users for testing permissions
+		// This allows other users to connect to the socket (file-level permissions control access)
+		if strings.HasSuffix(dir, "sockets") {
+			if err := os.Chmod(dir, 0777); err != nil {
+				return fmt.Errorf("failed to set permissions on sockets directory %s: %w", dir, err)
+			}
 		}
 	}
 
