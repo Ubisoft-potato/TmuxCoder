@@ -34,6 +34,9 @@ type StartOptions struct {
 	AttachRead    bool // Attach in read-only mode
 	AttachOnly    bool // Only attach, don't configure
 
+	// Merge target
+	MergeInto string // tmux session name to merge into
+
 	// Advanced options
 	NoAutoStart  bool   // Don't start panels automatically
 	DetachKeys   string // Custom detach key sequence
@@ -66,6 +69,9 @@ func CmdStart(args []string) error {
 	fs.BoolVar(&opts.ForceNew, "force-new-session", false, "Force kill existing and create new (alias)")
 	fs.BoolVar(&opts.AttachRead, "read-only", false, "Attach in read-only mode")
 	fs.BoolVar(&opts.AttachOnly, "attach-only", false, "Only attach to existing session")
+
+	// Merge target
+	fs.StringVar(&opts.MergeInto, "merge-into", "", "Merge into an existing tmux session (create a new window there)")
 
 	// Advanced flags
 	fs.BoolVar(&opts.NoAutoStart, "no-auto-start", false, "Don't start panels automatically")
@@ -125,6 +131,13 @@ func CmdStart(args []string) error {
 	}
 	if opts.ReloadLayout && opts.AttachOnly {
 		return fmt.Errorf("cannot combine --reload-layout with --attach-only")
+	}
+
+	if strings.TrimSpace(opts.MergeInto) != "" && opts.AttachOnly {
+		return fmt.Errorf("cannot combine --merge-into with --attach-only")
+	}
+	if strings.TrimSpace(opts.MergeInto) != "" && opts.ForceNew {
+		return fmt.Errorf("cannot combine --merge-into with --force")
 	}
 
 	// Handle reload-layout command (special case)
@@ -382,6 +395,11 @@ func buildLegacyArgs(opts *StartOptions) []string {
 	}
 	if opts.ReloadLayout {
 		args = append(args, "--reload-layout")
+	}
+	if strings.TrimSpace(opts.MergeInto) != "" {
+		// Use = form so the merge target isn't mistaken for a positional session name
+		// by legacy startup code that scans for the first non-flag argument.
+		args = append(args, "--merge-into="+opts.MergeInto)
 	}
 
 	// Add session name as positional argument

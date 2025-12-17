@@ -34,8 +34,9 @@ build-cli: ## Build the tmuxcoder CLI binary
 	@mkdir -p $(BUILD_DIR)
 	@$(GO) build $(GOFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/$(BINARY_NAME)
 	@echo "$(GREEN)✓ Built: $(BUILD_DIR)/$(BINARY_NAME)$(NC)"
-	@# Also create a copy in project root for convenience
-	@cp $(BUILD_DIR)/$(BINARY_NAME) ./$(BINARY_NAME)
+	@# Also place/replace a copy in project root for convenience.
+	@# Avoid writing directly to an executing binary (Text file busy) by using atomic rename.
+	@tmp=./$(BINARY_NAME).new; cp $(BUILD_DIR)/$(BINARY_NAME) $$tmp && mv -f $$tmp ./$(BINARY_NAME)
 	@echo "$(GREEN)✓ Copied to: ./$(BINARY_NAME)$(NC)"
 
 build-panels: ## Build all panel binaries

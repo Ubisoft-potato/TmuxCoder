@@ -39,6 +39,7 @@ import (
 	"github.com/opencode/tmux_coder/internal/types"
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
+	"golang.org/x/term"
 )
 
 // RunMode defines how the orchestrator handles signals
@@ -108,10 +109,16 @@ type TmuxOrchestrator struct {
 	// Stage 6: Process monitoring and health detection
 	healthChecker *supervision.PaneHealthChecker
 	appConfig     *appconfig.Config
+
+	// Merge mode: when set, build panes inside an existing tmux session window
+	// instead of creating/managing our own tmux session.
+	tmuxTargetSession string // target tmux session to merge into (empty means normal mode)
+	mergedWindowID    string // window id created for this orchestrator when merging
+	rootWindowTarget  string // window target to use for layout root when merging
 }
 
 // NewTmuxOrchestrator creates a new tmux orchestrator
-func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, httpClient *opencode.Client, serverOnly bool, layout *tmuxconfig.Layout, reuseExisting bool, forceNew bool, attachOnly bool, configPath string, runMode RunMode) *TmuxOrchestrator {
+func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, httpClient *opencode.Client, serverOnly bool, layout *tmuxconfig.Layout, reuseExisting bool, forceNew bool, attachOnly bool, configPath string, runMode RunMode, tmuxTargetSession string) *TmuxOrchestrator {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Get current user information for session owner
@@ -132,27 +139,28 @@ func NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL string, h
 	}
 
 	return &TmuxOrchestrator{
-		sessionName:     sessionName,
-		socketPath:      socketPath,
-		statePath:       statePath,
-		httpClient:      httpClient,
-		ctx:             ctx,
-		cancel:          cancel,
-		tmuxCommand:     "tmux",
-		serverOnly:      serverOnly,
-		sseClient:       &http.Client{Timeout: 0}, // No timeout for SSE connections
-		serverURL:       serverURL,
-		layout:          layout,
-		panes:           map[string]string{},
-		paneSupervisors: map[string]context.CancelFunc{},
-		messageRoles:    map[string]string{},
-		reuseExisting:   reuseExisting,
-		forceNewSession: forceNew,
-		attachOnly:      attachOnly,
-		configPath:      configPath,
-		runMode:         runMode, // Stage 3: Signal handling mode
-		startedAt:       time.Now(),
-		owner:           owner,
+		sessionName:       sessionName,
+		socketPath:        socketPath,
+		statePath:         statePath,
+		httpClient:        httpClient,
+		ctx:               ctx,
+		cancel:            cancel,
+		tmuxCommand:       "tmux",
+		serverOnly:        serverOnly,
+		sseClient:         &http.Client{Timeout: 0}, // No timeout for SSE connections
+		serverURL:         serverURL,
+		layout:            layout,
+		panes:             map[string]string{},
+		paneSupervisors:   map[string]context.CancelFunc{},
+		messageRoles:      map[string]string{},
+		reuseExisting:     reuseExisting,
+		forceNewSession:   forceNew,
+		attachOnly:        attachOnly,
+		configPath:        configPath,
+		runMode:           runMode, // Stage 3: Signal handling mode
+		startedAt:         time.Now(),
+		owner:             owner,
+		tmuxTargetSession: strings.TrimSpace(tmuxTargetSession),
 	}
 }
 
@@ -235,10 +243,11 @@ func (orch *TmuxOrchestrator) Start() error {
 	}
 
 	// Stage 6: Initialize health checker
-	orch.healthChecker = supervision.NewPaneHealthChecker(
-		orch.tmuxCommand,
-		orch.sessionName,
-	)
+	healthSession := orch.sessionName
+	if strings.TrimSpace(orch.tmuxTargetSession) != "" {
+		healthSession = orch.tmuxTargetSession
+	}
+	orch.healthChecker = supervision.NewPaneHealthChecker(orch.tmuxCommand, healthSession)
 	log.Printf("[Stage 6] Health checker initialized")
 
 	// In server-only mode, don't manage tmux session
@@ -258,31 +267,62 @@ func (orch *TmuxOrchestrator) Start() error {
 
 	needsConfiguration := false
 
-	if sessionExists {
-		if orch.forceNewSession {
-			if err := orch.killTmuxSession(); err != nil {
-				return fmt.Errorf("failed to stop existing session: %w", err)
-			}
-			sessionExists = false
-		} else if orch.reuseExisting {
-			if err := orch.resetTmuxWindow(); err != nil {
-				return fmt.Errorf("failed to prepare existing session: %w", err)
-			}
-			needsConfiguration = true // Reuse requires reconfiguration
-		} else {
-			if err := orch.killTmuxSession(); err != nil {
-				return fmt.Errorf("failed to stop existing session: %w", err)
-			}
-			sessionExists = false
+	// Merge mode: create a new window inside an existing tmux session
+	if strings.TrimSpace(orch.tmuxTargetSession) != "" {
+		if err := exec.CommandContext(orch.ctx, orch.tmuxCommand, "has-session", "-t", orch.tmuxTargetSession).Run(); err != nil {
+			return fmt.Errorf("merge target session '%s' not found", orch.tmuxTargetSession)
 		}
-	}
+		// NOTE: tmux new-window expects a target *window*. Passing a numeric session name
+		// like "0" is ambiguous and can be interpreted as a window index. Use "<session>:"
+		// to disambiguate and always target the session.
+		target := orch.tmuxTargetSession
+		if !strings.Contains(target, ":") {
+			target = target + ":"
+		}
 
-	if !sessionExists {
-		// Create tmux session
-		if err := orch.createTmuxSession(); err != nil {
-			return fmt.Errorf("failed to create tmux session: %w", err)
+		cmd := exec.CommandContext(orch.ctx, orch.tmuxCommand, "new-window", "-d", "-t", target, "-P", "-F", "#{window_id}")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("failed to create window in target session %q: %w\n%s", orch.tmuxTargetSession, err, strings.TrimSpace(string(out)))
 		}
-		needsConfiguration = true // New session requires configuration
+		winID := strings.TrimSpace(string(out))
+		if winID == "" {
+			return fmt.Errorf("tmux did not return a window id for merge window")
+		}
+		orch.mergedWindowID = winID
+		orch.rootWindowTarget = winID
+		if orch.layout == nil {
+			orch.layout = tmuxconfig.DefaultLayout()
+		}
+		needsConfiguration = true
+		sessionExists = true
+	} else {
+		if sessionExists {
+			if orch.forceNewSession {
+				if err := orch.killTmuxSession(); err != nil {
+					return fmt.Errorf("failed to stop existing session: %w", err)
+				}
+				sessionExists = false
+			} else if orch.reuseExisting {
+				if err := orch.resetTmuxWindow(); err != nil {
+					return fmt.Errorf("failed to prepare existing session: %w", err)
+				}
+				needsConfiguration = true // Reuse requires reconfiguration
+			} else {
+				if err := orch.killTmuxSession(); err != nil {
+					return fmt.Errorf("failed to stop existing session: %w", err)
+				}
+				sessionExists = false
+			}
+		}
+
+		if !sessionExists {
+			// Create tmux session
+			if err := orch.createTmuxSession(); err != nil {
+				return fmt.Errorf("failed to create tmux session: %w", err)
+			}
+			needsConfiguration = true // New session requires configuration
+		}
 	}
 
 	if orch.serverOnly {
@@ -309,6 +349,9 @@ func (orch *TmuxOrchestrator) Start() error {
 	}
 
 	orch.isRunning = true
+	if orch.mergedWindowID != "" {
+		_ = exec.CommandContext(orch.ctx, orch.tmuxCommand, "select-window", "-t", orch.mergedWindowID).Run()
+	}
 	log.Printf("Tmux session started successfully")
 	return nil
 }
@@ -1011,6 +1054,9 @@ func (orch *TmuxOrchestrator) ensureDaemonRunningForAttach() error {
 
 func (orch *TmuxOrchestrator) configurePanelsFromConfig() error {
 	sessionTarget := orch.sessionName + ":0"
+	if strings.TrimSpace(orch.rootWindowTarget) != "" {
+		sessionTarget = orch.rootWindowTarget
+	}
 	rootPane, err := orch.resolvePaneID(sessionTarget)
 	if err != nil {
 		return fmt.Errorf("failed to resolve root pane id: %w", err)
@@ -2036,6 +2082,15 @@ func (orch *TmuxOrchestrator) ReloadLayout(configOverride string) error {
 
 // killTmuxSession kills the tmux session if it exists
 func (orch *TmuxOrchestrator) killTmuxSession() error {
+	if orch.mergedWindowID != "" {
+		log.Printf("[Shutdown] Killing merged window %s (merge mode)", orch.mergedWindowID)
+		cmd := exec.Command(orch.tmuxCommand, "kill-window", "-t", orch.mergedWindowID)
+		if err := cmd.Run(); err != nil {
+			log.Printf("[Shutdown] Failed to kill merged window: %v", err)
+			return err
+		}
+		return nil
+	}
 	log.Printf("[Shutdown] Attempting to kill tmux session '%s'...", orch.sessionName)
 	cmd := exec.Command(orch.tmuxCommand, "kill-session", "-t", orch.sessionName)
 	if err := cmd.Run(); err != nil {
@@ -2268,7 +2323,11 @@ func sendReloadLayoutCommand(socketPath, sessionName, configPath string) error {
 
 // attachExistingSession attaches to an already-running tmux session without modifying orchestrator state.
 func (orch *TmuxOrchestrator) attachExistingSession() error {
-	cmd := exec.Command(orch.tmuxCommand, "attach-session", "-t", orch.sessionName)
+	target := orch.sessionName
+	if strings.TrimSpace(orch.tmuxTargetSession) != "" {
+		target = orch.tmuxTargetSession
+	}
+	cmd := exec.Command(orch.tmuxCommand, "attach-session", "-t", target)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -2281,7 +2340,11 @@ func (orch *TmuxOrchestrator) attachToSession() error {
 		return fmt.Errorf("session is not running")
 	}
 
-	cmd := exec.Command(orch.tmuxCommand, "attach-session", "-t", orch.sessionName)
+	target := orch.sessionName
+	if strings.TrimSpace(orch.tmuxTargetSession) != "" {
+		target = orch.tmuxTargetSession
+	}
+	cmd := exec.Command(orch.tmuxCommand, "attach-session", "-t", target)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -2474,14 +2537,19 @@ func (orch *TmuxOrchestrator) monitorHealth() {
 
 // watchTmuxSession polls tmux has-session to detect session exit quickly
 func (orch *TmuxOrchestrator) watchTmuxSession() {
+	target := orch.sessionName
+	if strings.TrimSpace(orch.tmuxTargetSession) != "" {
+		target = orch.tmuxTargetSession
+	}
+
 	for {
 		select {
 		case <-orch.ctx.Done():
 			return
 		default:
-			cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", orch.sessionName)
+			cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", target)
 			if err := cmd.Run(); err != nil {
-				log.Printf("Tmux session '%s' no longer exists, shutting down", orch.sessionName)
+				log.Printf("Tmux session '%s' no longer exists, shutting down", target)
 				// Release lock immediately so new process can start
 				if orch.lock != nil {
 					orch.lock.Release()
@@ -2516,7 +2584,11 @@ func (orch *TmuxOrchestrator) performHealthCheck() {
 
 // isTmuxSessionRunning checks if the tmux session is still running
 func (orch *TmuxOrchestrator) isTmuxSessionRunning() bool {
-	cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", orch.sessionName)
+	target := orch.sessionName
+	if strings.TrimSpace(orch.tmuxTargetSession) != "" {
+		target = orch.tmuxTargetSession
+	}
+	cmd := exec.Command(orch.tmuxCommand, "has-session", "-t", target)
 	return cmd.Run() == nil
 }
 
@@ -2681,8 +2753,11 @@ func runLegacyMode() {
 	// Stage 3: Signal handling mode flags
 	var daemonFlag bool
 	var foregroundFlag bool
+	var mergeIntoFlag string
 	flag.BoolVar(&daemonFlag, "daemon", false, "Run in daemon mode (Ctrl+C ignored, use IPC to shutdown)")
 	flag.BoolVar(&foregroundFlag, "foreground", false, "Run in foreground mode (Ctrl+C triggers shutdown) [default]")
+	// Accept merge flag in legacy mode as a no-op flag parsed here; actual use happens later.
+	flag.StringVar(&mergeIntoFlag, "merge-into", "", "Merge into an existing tmux session (create a new window there)")
 
 	flag.Parse()
 
@@ -2899,7 +2974,8 @@ func runLegacyMode() {
 	}
 
 	// Create orchestrator
-	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly, layoutCfg, reuseSessionFlag, forceNewSessionFlag, attachOnlyFlag, configPath, runMode)
+	mergeInto := strings.TrimSpace(mergeIntoFlag)
+	orchestrator := NewTmuxOrchestrator(sessionName, socketPath, statePath, serverURL, httpClient, serverOnly, layoutCfg, reuseSessionFlag, forceNewSessionFlag, attachOnlyFlag, configPath, runMode, mergeInto)
 	orchestrator.lock = lock
 
 	if err := orchestrator.prepareExistingSession(); err != nil {
@@ -3914,11 +3990,7 @@ func parseServerTime(timestamp float64) time.Time {
 
 // isTerminal checks if stdin is a terminal
 func isTerminal() bool {
-	stat, err := os.Stdin.Stat()
-	if err != nil {
-		return false
-	}
-	return (stat.Mode() & os.ModeCharDevice) != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // startAPIRequestHandler starts the API request handler for TUI control

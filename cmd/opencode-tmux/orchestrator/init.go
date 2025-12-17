@@ -13,6 +13,7 @@ import (
 	"github.com/opencode/tmux_coder/internal/theme"
 	"github.com/sst/opencode-sdk-go"
 	"github.com/sst/opencode-sdk-go/option"
+	"golang.org/x/term"
 )
 
 // InitResult holds the result of orchestrator initialization
@@ -189,8 +190,7 @@ func setupTmuxSession(cfg *config.OrchestratorConfig) (shouldAttach bool, err er
 
 // isTerminal checks if stdin is a terminal
 func isTerminal() bool {
-	fileInfo, _ := os.Stdin.Stat()
-	return (fileInfo.Mode() & os.ModeCharDevice) != 0
+	return term.IsTerminal(int(os.Stdin.Fd()))
 }
 
 // CreateHTTPClient creates an HTTP client for OpenCode API
