@@ -439,6 +439,9 @@ func (orch *TmuxOrchestrator) ensureSocketClean() error {
 
 	switch status {
 	case socket.SocketNonExistent:
+		if err != nil {
+			return fmt.Errorf("socket path is not usable: %w", err)
+		}
 		// Ideal case - socket doesn't exist, can create directly
 		log.Printf("[Socket] Path is clean: %s", orch.socketPath)
 		return nil
@@ -1042,7 +1045,7 @@ func (orch *TmuxOrchestrator) prepareExistingSession() error {
 
 func (orch *TmuxOrchestrator) ensureDaemonRunningForAttach() error {
 	status, err := socket.CheckSocketStatus(orch.socketPath)
-	if err != nil && status != socket.SocketNonExistent && status != socket.SocketStale {
+	if err != nil && status != socket.SocketStale {
 		return fmt.Errorf("failed to check orchestrator socket: %w", err)
 	}
 
