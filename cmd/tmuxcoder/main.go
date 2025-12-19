@@ -37,7 +37,7 @@ func main() {
 		os.Exit(1)
 	}()
 
-	// Handle zero-argument case: smart start
+	// Handle zero-argument case: smart start with merge prompt
 	if len(remainingArgs) == 0 {
 		if err := app.SmartStart(""); err != nil {
 			fmt.Fprintf(os.Stderr, "Error: %v\n", err)

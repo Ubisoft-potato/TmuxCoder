@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -28,6 +29,8 @@ type App struct {
 
 	layoutOverride string
 	layoutApplied  bool
+
+	mergeTarget string
 }
 
 const (
@@ -81,14 +84,57 @@ func (a *App) SmartStart(sessionName string) error {
 		return err
 	}
 
-	// 2. Check if session already exists and is running
-	if a.isSessionRunning(sessionName) {
-		if err := a.maybeApplyLayoutOverride(sessionName); err != nil {
-			return err
+	// 2. Prompt merge behavior
+	insideTmux := os.Getenv("TMUX") != ""
+	if insideTmux {
+		if cur := a.currentTmuxSession(); cur != "" {
+			choice := promptChoice(fmt.Sprintf("Detected tmux session '%s'. Merge panes into this session?", cur), []string{"merge", "parallel", "cancel"}, "merge")
+			if choice == "cancel" {
+				return fmt.Errorf("user canceled")
+			}
+			if choice == "merge" {
+				a.mergeTarget = cur
+			}
 		}
-		fmt.Printf("Session '%s' is already running\n", sessionName)
-		fmt.Printf("Attaching to existing session...\n")
-		return a.attachToSession(sessionName, false)
+	} else {
+		sessions := listTmuxSessions()
+		if len(sessions) > 0 {
+			def := "parallel"
+			if len(sessions) == 1 {
+				def = "merge"
+			}
+			choice := promptChoice("Found existing tmux session(s). Merge into one?", []string{"merge", "parallel", "cancel"}, def)
+			if choice == "cancel" {
+				return fmt.Errorf("user canceled")
+			}
+			if choice == "merge" {
+				target := sessions[0]
+				if len(sessions) > 1 {
+					target = promptSelect("Select tmux session to merge into", sessions, sessions[0])
+				}
+				a.mergeTarget = target
+			}
+		}
+	}
+
+	// If session already running, attach (or switch) to the right tmux session.
+	if a.isSessionRunning(sessionName) {
+		if a.mergeTarget == "" {
+			if err := a.maybeApplyLayoutOverride(sessionName); err != nil {
+				return err
+			}
+			fmt.Printf("Session '%s' is already running\n", sessionName)
+			fmt.Printf("Attaching to existing session...\n")
+			return a.attachToSession(sessionName, false)
+		}
+
+		fmt.Printf("Daemon for '%s' is already running\n", sessionName)
+		if insideTmux {
+			fmt.Printf("Merged into tmux session '%s'. Switch there to view panels.\n", a.mergeTarget)
+			return nil
+		}
+		fmt.Printf("Attaching to tmux session '%s'...\n", a.mergeTarget)
+		return a.attachToSession(a.mergeTarget, false)
 	}
 
 	// 3. Start daemon in background
@@ -97,13 +143,29 @@ func (a *App) SmartStart(sessionName string) error {
 		return fmt.Errorf("failed to start daemon: %w", err)
 	}
 
-	// 4. Wait for session to be ready
-	fmt.Printf("Waiting for session to be ready...\n")
-	if err := a.waitForSessionReady(sessionName, 10); err != nil {
-		return fmt.Errorf("session not ready: %w", err)
+	// 4. Wait for readiness
+	if a.mergeTarget == "" {
+		fmt.Printf("Waiting for session to be ready...\n")
+		if err := a.waitForSessionReady(sessionName, 10); err != nil {
+			return fmt.Errorf("session not ready: %w", err)
+		}
+	} else {
+		fmt.Printf("Waiting for daemon to be ready...\n")
+		if err := a.waitForDaemonReady(sessionName, 15); err != nil {
+			return fmt.Errorf("daemon not ready: %w", err)
+		}
 	}
 
-	// 5. Attach to session
+	// 5. Attach (or stay)
+	if a.mergeTarget != "" {
+		if insideTmux {
+			fmt.Printf("Merged into tmux session '%s'. Switch there to view panels.\n", a.mergeTarget)
+			return nil
+		}
+		fmt.Printf("Attaching to tmux session '%s'...\n", a.mergeTarget)
+		return a.attachToSession(a.mergeTarget, false)
+	}
+
 	fmt.Printf("Attaching to session '%s'...\n", sessionName)
 	return a.attachToSession(sessionName, false)
 }
@@ -237,7 +299,11 @@ func (a *App) PassThrough(args []string) error {
 	if err := a.ensureServer(); err != nil {
 		return err
 	}
-	cmd := exec.Command(a.binPath, args...)
+	finalArgs := append([]string{}, args...)
+	if a.mergeTarget != "" && !containsFlag(finalArgs, "--merge-into") {
+		finalArgs = append([]string{"--merge-into=" + a.mergeTarget}, finalArgs...)
+	}
+	cmd := exec.Command(a.binPath, finalArgs...)
 	cmd.Env = os.Environ()
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
@@ -326,14 +392,17 @@ func (a *App) isValidSessionName(name string) bool {
 
 // isSessionRunning checks if a session is currently running
 func (a *App) isSessionRunning(sessionName string) bool {
-	// Check if tmux session exists
-	cmd := exec.Command("tmux", "has-session", "-t", sessionName)
-	if cmd.Run() != nil {
-		return false
+	// In merge mode, the orchestrator session name does not correspond to a tmux session.
+	// Only the daemon being alive matters.
+	if a.mergeTarget == "" {
+		cmd := exec.Command("tmux", "has-session", "-t", sessionName)
+		if cmd.Run() != nil {
+			return false
+		}
 	}
 
 	// Check if daemon is running (via status command)
-	cmd = exec.Command(a.binPath, "status", "--json", sessionName)
+	cmd := exec.Command(a.binPath, "status", "--json", sessionName)
 	cmd.Env = os.Environ()
 	output, err := cmd.Output()
 	if err != nil {
@@ -345,6 +414,9 @@ func (a *App) isSessionRunning(sessionName string) bool {
 		DaemonRunning bool   `json:"daemon_running"`
 	}
 	if err := json.Unmarshal(output, &status); err == nil {
+		if a.mergeTarget != "" {
+			return status.DaemonRunning
+		}
 		return status.DaemonRunning && strings.EqualFold(status.Status, "Running")
 	}
 
@@ -440,11 +512,25 @@ func (a *App) startDaemonBackground(sessionName string) error {
 	}
 	// Use opencode-tmux start with --daemon flag
 	// The daemon will detach automatically
-	cmd := exec.Command(a.binPath, "start", sessionName, "--daemon")
+	cmdArgs := []string{"start", sessionName, "--daemon"}
+	if a.mergeTarget != "" {
+		cmdArgs = append(cmdArgs, "--merge-into", a.mergeTarget)
+	}
+	cmd := exec.Command(a.binPath, cmdArgs...)
 	cmd.Env = os.Environ() // Inherit environment variables including OPENCODE_SERVER
+
+	// Capture output to surface errors to the user
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
 
 	// Start the process
 	if err := cmd.Run(); err != nil {
+		out := strings.TrimSpace(stdout.String())
+		errOut := strings.TrimSpace(stderr.String())
+		if out != "" || errOut != "" {
+			return fmt.Errorf("failed to start daemon process: %w\n%s\n%s", err, out, errOut)
+		}
 		return fmt.Errorf("failed to start daemon process: %w", err)
 	}
 
@@ -617,18 +703,141 @@ func (a *App) waitForSessionReady(sessionName string, timeoutSeconds int) error 
 	return fmt.Errorf("timeout waiting for session '%s' to be ready", sessionName)
 }
 
+// waitForDaemonReady polls opencode-tmux status --json until daemon_running is true
+func (a *App) waitForDaemonReady(sessionName string, timeoutSeconds int) error {
+	deadline := time.Now().Add(time.Duration(timeoutSeconds) * time.Second)
+	for time.Now().Before(deadline) {
+		cmd := exec.Command(a.binPath, "status", "--json", sessionName)
+		cmd.Env = os.Environ()
+		out, err := cmd.Output()
+		if err == nil && len(out) > 0 {
+			var status struct {
+				DaemonRunning bool `json:"daemon_running"`
+			}
+			if jsonErr := json.Unmarshal(out, &status); jsonErr == nil {
+				if status.DaemonRunning {
+					return nil
+				}
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	return fmt.Errorf("timeout waiting for daemon for '%s'", sessionName)
+}
+
+// listTmuxSessions returns available tmux session names
+func listTmuxSessions() []string {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		return nil
+	}
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").Output()
+	if err != nil || len(out) == 0 {
+		return nil
+	}
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	res := make([]string, 0, len(lines))
+	for _, l := range lines {
+		l = strings.TrimSpace(l)
+		if l != "" {
+			res = append(res, l)
+		}
+	}
+	return res
+}
+
+// promptChoice asks the user a yes/no/option question
+func promptChoice(question string, options []string, def string) string {
+	fmt.Printf("%s [%s] (default: %s): ", question, strings.Join(options, "/"), def)
+	r := bufio.NewReader(os.Stdin)
+	for {
+		line, _ := r.ReadString('\n')
+		v := strings.ToLower(strings.TrimSpace(line))
+		if v == "" {
+			return def
+		}
+		for _, o := range options {
+			if v == strings.ToLower(o) {
+				return v
+			}
+		}
+		fmt.Printf("Please enter one of [%s]: ", strings.Join(options, "/"))
+	}
+}
+
+// promptSelect lets the user select one item from a list
+func promptSelect(question string, items []string, def string) string {
+	fmt.Printf("%s\n", question)
+	for i, it := range items {
+		fmt.Printf("  %d) %s\n", i+1, it)
+	}
+	fmt.Printf("Enter number (default %s): ", def)
+	r := bufio.NewReader(os.Stdin)
+	for {
+		line, _ := r.ReadString('\n')
+		v := strings.TrimSpace(line)
+		if v == "" {
+			return def
+		}
+		idx, _ := strconv.Atoi(v)
+		if idx >= 1 && idx <= len(items) {
+			return items[idx-1]
+		}
+		fmt.Printf("Enter a number between 1 and %d: ", len(items))
+	}
+}
+
+func containsFlag(args []string, name string) bool {
+	for _, a := range args {
+		if a == name || strings.HasPrefix(a, name+"=") {
+			return true
+		}
+	}
+	return false
+}
+
 // attachToSession attaches to a tmux session
 func (a *App) attachToSession(sessionName string, readOnly bool) error {
+	// When already inside tmux, prefer switching the current client
+	// instead of trying to attach (which errors with: "sessions should be nested with care").
+	if os.Getenv("TMUX") != "" {
+		// Best experience: switch the existing client to the target session.
+		sc := exec.Command("tmux", "switch-client", "-t", sessionName)
+		sc.Stdin = os.Stdin
+		sc.Stdout = os.Stdout
+		sc.Stderr = os.Stderr
+		if err := sc.Run(); err == nil {
+			return nil
+		}
+
+		// Fallback: force a nested attach by unsetting TMUX in the child env.
+		// This mirrors tmux's own hint: "unset $TMUX to force".
+		env := make([]string, 0, len(os.Environ()))
+		for _, e := range os.Environ() {
+			if !strings.HasPrefix(e, "TMUX=") {
+				env = append(env, e)
+			}
+		}
+		args := []string{"attach-session", "-t", sessionName}
+		if readOnly {
+			args = append(args, "-r")
+		}
+		cmd := exec.Command("tmux", args...)
+		cmd.Env = env
+		cmd.Stdin = os.Stdin
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
+		return cmd.Run()
+	}
+
+	// Not inside tmux: do a normal attach.
 	args := []string{"attach-session", "-t", sessionName}
 	if readOnly {
 		args = append(args, "-r")
 	}
-
 	cmd := exec.Command("tmux", args...)
 	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
-
 	return cmd.Run()
 }
 
