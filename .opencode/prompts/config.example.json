@@ -1,5 +1,15 @@
 {
   "mode": "local",
+  "promptProxy": {
+    "enabled": true,
+    "overrideSystem": true,
+    "overrideParams": true
+  },
+  "monkeyPatch": {
+    "enabled": true,
+    "interceptEnvironment": true,
+    "interceptCustom": true
+  },
 
   "local": {
     "templatesDir": ".opencode/prompts/templates",

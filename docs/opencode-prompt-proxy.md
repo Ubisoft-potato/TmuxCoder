@@ -24,6 +24,8 @@
    - Reads `.opencode/prompts/config.json`, instantiates `TmuxCoderPrompts`, and prepares a per-session parameter cache.
    - `chat.message` enriches the context with git metadata (`git -C <worktree>`), calls the SDK, overrides `output.message.system`, and caches parameter overrides.
    - `chat.params` consumes cached parameters to set temperature/topP/model options (e.g., `options.thinking`); `event` hooks clear caches when sessions end.
+   - Applies a config-driven monkey patch to OpenCode’s `SystemPrompt`, guaranteeing that environment/custom blocks are only appended when explicitly allowed (`monkeyPatch` section in `config.json`).
+   - Honors `promptProxy.enabled/overrideSystem/overrideParams` switches so teams can compare baseline OpenCode behavior vs. Prompt Proxy without uninstalling the plugin.
 2. **Prompt-core SDK** (`prompt-core/src`)
    - `TmuxCoderPrompts` manages resolver lifecycle plus an in-memory cache so multiple hooks in the same session reuse results.
    - `LocalResolver` composes:
@@ -60,7 +62,35 @@ flowchart LR
 - **Version control**: Templates and JSON configs change through regular pull requests, ensuring prompt adjustments are reviewed, traceable, and easy to revert.
 - **Experimentation**: `experiments.json` supports multi-variant traffic splits. Session-ID hashing keeps allocations sticky, enabling gradual rollouts and instant rollback by flipping the config.
 
-## 6. Extension Opportunities
+## 6. Extending Variables (Variable Providers)
+Hardcoded variables (like `{{timestamp}}`) are replaced by an extensible provider system in `.opencode/plugin/variable-providers.ts`.
+
+### Built-in Providers
+- **Time**: `{{timestamp}}` (ISO), `{{date_ymd}}`, `{{time_hms}}`, `{{time_human}}`
+- **Git**: `{{git_branch}}`, `{{git_dirty}}`, `{{git_root}}`
+- **System**: `{{os_platform}}`, `{{node_env}}`
+
+### How to Add Custom Variables
+1. Open `.opencode/plugin/variable-providers.ts`.
+2. Define a new `VariableProvider` function:
+   ```typescript
+   export const myProvider: VariableProvider = async ({ env }) => {
+     return {
+       api_key_status: env.API_KEY ? "set" : "missing",
+       custom_role: "developer"
+     }
+   }
+   ```
+3. Register it in the `providers` object:
+   ```typescript
+   const providers = {
+     // ... exisiting
+     my: myProvider
+   }
+   ```
+4. Use `{{custom_role}}` directly in your templates (`.opencode/prompts/templates/*.txt`). If you set `providers.custom.namespace`, the plugin automatically rewrites custom variables to use that prefix (e.g., `namespace: "ops"` ⇒ `{{ops_custom_role}}`).
+
+## 7. Extension Opportunities
 - **Remote mode**: `PromptConfig.mode` already reserves `remote`/`hybrid`; swapping `LocalResolver` for an HTTP resolver requires zero OpenCode changes and keeps local files as fallback.
 - **Observability**: The plugin can emit structured logs or forward telemetry to shared sinks (example uses `console.log`) to trace which template/variant applied to each session.
 - **Security**: For cross-team deployments, add allowlists or signature checks inside the plugin to ensure only trusted template bundles are loaded.

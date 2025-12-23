@@ -11,9 +11,10 @@ import {
   getAvailableVariables,
 } from "./variable-providers"
 
-// ========== Monkey Patch SystemPrompt ==========
-// Import SystemPrompt module for monkey patching
+// ========== SystemPrompt Monkey Patch Support ==========
 let SystemPrompt: any = null
+let originalEnvironment: any = null
+let originalCustom: any = null
 let monkeyPatchApplied = false
 
 try {
@@ -21,38 +22,101 @@ try {
     "../../packages/opencode/packages/opencode/src/session/system.ts"
   )
   SystemPrompt = systemModule.SystemPrompt
-
-  // Preserve originals (for debugging)
-  const originalEnvironment = SystemPrompt.environment
-  const originalCustom = SystemPrompt.custom
-
-  // Replace with no-op functions
-  SystemPrompt.environment = async function () {
-    logger.debug("SystemPrompt.environment() intercepted - returning empty", { module: "SystemPrompt" })
-    return []
-  }
-
-  SystemPrompt.custom = async function () {
-    logger.debug("SystemPrompt.custom() intercepted - returning empty", { module: "SystemPrompt" })
-    return []
-  }
-
-  monkeyPatchApplied = true
-  logger.info("Monkey patch applied successfully", { module: "SystemPrompt" })
-} catch (error) {
-  logger.warn("Failed to import/patch SystemPrompt - continuing without monkey patch", {
+  originalEnvironment = SystemPrompt?.environment
+  originalCustom = SystemPrompt?.custom
+  logger.debug("SystemPrompt module loaded for potential monkey patching", {
     module: "SystemPrompt",
-    error: error instanceof Error ? error.message : String(error)
+  })
+} catch (error) {
+  logger.warn("Failed to import SystemPrompt module - monkey patch disabled", {
+    module: "SystemPrompt",
+    error: error instanceof Error ? error.message : String(error),
   })
 }
-// ========== End Monkey Patch ==========
+
+function restoreSystemPromptFunctions() {
+  if (SystemPrompt) {
+    if (originalEnvironment) {
+      SystemPrompt.environment = originalEnvironment
+    }
+    if (originalCustom) {
+      SystemPrompt.custom = originalCustom
+    }
+  }
+}
+
+function applyMonkeyPatch(config: PromptConfig): boolean {
+  const proxyControls = getProxyControls(config)
+
+  if (!proxyControls.overrideSystem) {
+    logger.info("Monkey patch skipped because overrideSystem is disabled", {
+      module: "SystemPrompt",
+    })
+    return false
+  }
+
+  const patchConfig = {
+    enabled: config.monkeyPatch?.enabled ?? true,
+    interceptEnvironment: config.monkeyPatch?.interceptEnvironment ?? true,
+    interceptCustom: config.monkeyPatch?.interceptCustom ?? true,
+  }
+
+  if (!patchConfig.enabled) {
+    restoreSystemPromptFunctions()
+    logger.info("Monkey patch disabled via configuration", {
+      module: "SystemPrompt",
+    })
+    return false
+  }
+
+  if (!SystemPrompt) {
+    logger.warn("SystemPrompt unavailable - cannot apply monkey patch", {
+      module: "SystemPrompt",
+    })
+    return false
+  }
+
+  restoreSystemPromptFunctions()
+
+  let applied = false
+
+  if (patchConfig.interceptEnvironment && originalEnvironment) {
+    SystemPrompt.environment = async function () {
+      logger.debug("SystemPrompt.environment() intercepted - returning empty", {
+        module: "SystemPrompt",
+      })
+      return []
+    }
+    applied = true
+  }
+
+  if (patchConfig.interceptCustom && originalCustom) {
+    SystemPrompt.custom = async function () {
+      logger.debug("SystemPrompt.custom() intercepted - returning empty", {
+        module: "SystemPrompt",
+      })
+      return []
+    }
+    applied = true
+  }
+
+  if (applied) {
+    logger.info("Monkey patch applied", {
+      module: "SystemPrompt",
+      interceptEnvironment: patchConfig.interceptEnvironment,
+      interceptCustom: patchConfig.interceptCustom,
+    })
+  } else {
+    logger.info("Monkey patch skipped - no interceptors enabled", {
+      module: "SystemPrompt",
+    })
+  }
+
+  return applied
+}
+// ========== End SystemPrompt Monkey Patch Support ==========
 
 export const PromptProxy: Plugin = async ({ project, directory, worktree, $ }) => {
-  logger.info("Plugin bootstrap", {
-    monkeyPatchActive: monkeyPatchApplied,
-    directory,
-    worktree,
-  })
   // Find the directory containing .opencode/prompts
   let configRoot = worktree
 
@@ -95,6 +159,15 @@ export const PromptProxy: Plugin = async ({ project, directory, worktree, $ }) =
 
   // Load configuration from found root
   const config = await loadConfig(configRoot)
+  const proxyControls = getProxyControls(config)
+  monkeyPatchApplied = applyMonkeyPatch(config)
+
+  logger.info("Plugin bootstrap", {
+    monkeyPatchActive: monkeyPatchApplied,
+    directory,
+    worktree,
+    promptProxy: proxyControls,
+  })
 
   // Configure providers based on config
   if (config.providers) {
@@ -145,6 +218,7 @@ export const PromptProxy: Plugin = async ({ project, directory, worktree, $ }) =
   logger.info("📋 Available template variables", {
     total: availableVars.total + customProviderCount,
     builtIn: availableVars.builtIn,
+    customNamespace: availableVars.customNamespace,
     customProviders: Object.keys(customProviders),
   })
 
@@ -162,6 +236,11 @@ export const PromptProxy: Plugin = async ({ project, directory, worktree, $ }) =
      * Hook 1: Customize system prompt
      */
     "chat.message": async (input, output) => {
+      if (!proxyControls.enabled || !proxyControls.overrideSystem) {
+        logger.info("Prompt Proxy system override disabled - skipping chat.message hook")
+        return
+      }
+
       const { sessionID, agent = "default", model } = input
       const sessionIDShort = sessionID.substring(0, 8)
 
@@ -289,6 +368,10 @@ export const PromptProxy: Plugin = async ({ project, directory, worktree, $ }) =
      * Hook 2: Customize model parameters
      */
     "chat.params": async (input, output) => {
+      if (!proxyControls.enabled || !proxyControls.overrideParams) {
+        return
+      }
+
       const { sessionID } = input
       const sessionIDShort = sessionID.substring(0, 8)
 
@@ -327,6 +410,10 @@ export const PromptProxy: Plugin = async ({ project, directory, worktree, $ }) =
      * Hook 3: Listen to events (optional)
      */
     event: async ({ event }) => {
+      if (!proxyControls.enabled || !proxyControls.overrideParams) {
+        return
+      }
+
       if (event.type === "session.completed" || event.type === "session.deleted") {
         const sessionID = (event as any).sessionID
         if (sessionID) {
@@ -371,6 +458,16 @@ async function loadConfig(directory: string): Promise<PromptConfig> {
 
   const defaultConfig: PromptConfig = {
     mode: "local",
+    promptProxy: {
+      enabled: true,
+      overrideSystem: true,
+      overrideParams: true,
+    },
+    monkeyPatch: {
+      enabled: true,
+      interceptEnvironment: true,
+      interceptCustom: true,
+    },
     local: {
       templatesDir: join(directory, ".opencode/prompts/templates"),
       parametersPath: join(directory, ".opencode/prompts/parameters.json"),
@@ -400,6 +497,14 @@ async function loadConfig(directory: string): Promise<PromptConfig> {
           ...defaultConfig.cache,
           ...userConfig.cache,
         },
+        promptProxy: {
+          ...defaultConfig.promptProxy,
+          ...userConfig.promptProxy,
+        },
+        monkeyPatch: {
+          ...defaultConfig.monkeyPatch,
+          ...userConfig.monkeyPatch,
+        },
         logging: {
           ...defaultConfig.logging,
           ...userConfig.logging,
@@ -423,4 +528,13 @@ async function loadConfig(directory: string): Promise<PromptConfig> {
 function getProjectName(dirPath: string): string {
   const parts = dirPath.split("/")
   return parts[parts.length - 1] || "unknown"
+}
+
+function getProxyControls(config: PromptConfig) {
+  const enabled = config.promptProxy?.enabled !== false
+  return {
+    enabled,
+    overrideSystem: enabled && config.promptProxy?.overrideSystem !== false,
+    overrideParams: enabled && config.promptProxy?.overrideParams !== false,
+  }
 }

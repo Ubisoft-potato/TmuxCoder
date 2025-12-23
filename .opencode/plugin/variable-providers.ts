@@ -108,6 +108,7 @@ export function getAvailableVariables(): {
   builtIn: { [provider: string]: string[] }
   custom: string[]
   total: number
+  customNamespace?: string
 } {
   const builtInVars: { [provider: string]: string[] } = {}
   let totalCount = 0
@@ -141,6 +142,9 @@ export function getAvailableVariables(): {
     builtIn: builtInVars,
     custom: [],  // Will be populated with custom provider variables
     total: totalCount,
+    customNamespace: providerConfig.custom.namespace?.trim()
+      ? formatNamespace(providerConfig.custom.namespace)
+      : undefined,
   }
 }
 
@@ -346,10 +350,13 @@ export async function resolveContextVariables(
     ...enabledBuiltInProviders,
     ...extraProviders,
   })
+  const customProviderNames = new Set(Object.keys(extraProviders))
+  const customNamespace = providerConfig.custom.namespace?.trim()
 
   logger.debug("Resolving variables with providers", {
     enabled: Object.keys(enabledBuiltInProviders),
     custom: Object.keys(extraProviders),
+    customNamespace: customNamespace ? formatNamespace(customNamespace) : undefined,
   })
 
   const results = await Promise.allSettled(
@@ -400,10 +407,36 @@ export async function resolveContextVariables(
         }
       })
 
-      return { ...acc, ...data }
+      const isCustomProvider = customProviderNames.has(providerName)
+      const normalizedData = isCustomProvider
+        ? applyNamespaceToVariables(data, customNamespace)
+        : data
+
+      return { ...acc, ...normalizedData }
     }
     return acc
   }, {} as Record<string, any>)
+}
+
+function applyNamespaceToVariables(
+  data: Record<string, any>,
+  namespace?: string | null
+): Record<string, any> {
+  if (!namespace?.trim()) {
+    return { ...data }
+  }
+
+  const prefix = formatNamespace(namespace)
+  return Object.entries(data).reduce<Record<string, any>>((acc, [key, value]) => {
+    acc[`${prefix}${key}`] = value
+    return acc
+  }, {})
+}
+
+function formatNamespace(namespace: string): string {
+  const trimmed = namespace.trim()
+  if (!trimmed) return ""
+  return trimmed.endsWith("_") ? trimmed : `${trimmed}_`
 }
 
 /**

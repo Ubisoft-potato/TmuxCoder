@@ -64,6 +64,20 @@ export type PromptMode = "local" | "remote" | "hybrid"
 export interface PromptConfig {
   mode: PromptMode
 
+  // Feature toggles for PromptProxy behavior
+  promptProxy?: {
+    enabled?: boolean
+    overrideSystem?: boolean
+    overrideParams?: boolean
+  }
+
+  // Monkey patch configuration for OpenCode SystemPrompt
+  monkeyPatch?: {
+    enabled?: boolean
+    interceptEnvironment?: boolean
+    interceptCustom?: boolean
+  }
+
   // Local configuration
   local?: {
     templatesDir: string
