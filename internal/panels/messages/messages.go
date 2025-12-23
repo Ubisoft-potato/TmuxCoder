@@ -1263,6 +1263,9 @@ func (p *MessagesPanel) renderMessages() string {
 		content += lineStyle.Render(line.Content) + "\n"
 	}
 
+	// Debug aid: dump the rendered content so we can inspect stuck/pending messages
+	log.Printf("[MESSAGES] Rendered content:\n%s", content)
+
 	return content
 }
 
