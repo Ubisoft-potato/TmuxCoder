@@ -1,0 +1,108 @@
+================================================================================
+TEMPLATE VARIABLES QUICK REFERENCE
+================================================================================
+
+Usage: {{variable_name}} in template files
+
+GIT VARIABLES (cached for performance):
+────────────────────────────────────────────────────────────────────────────────
+  {{git_branch}}     Current git branch              example: main, develop
+  {{git_dirty}}      Has uncommitted changes?        example: true, false
+  {{git_root}}       Repository root path            example: /Users/user/project
+
+TIME VARIABLES (generated fresh each time):
+────────────────────────────────────────────────────────────────────────────────
+  {{timestamp}}      ISO 8601 timestamp              example: 2025-12-22T10:30:45.123Z
+  {{time_human}}     Human-readable time             example: 12/22/2025, 10:30:45 AM
+  {{date_ymd}}       Date (YYYY-MM-DD)               example: 2025-12-22
+  {{time_hms}}       Time (HH:MM:SS)                 example: 10:30:45
+
+SYSTEM VARIABLES:
+────────────────────────────────────────────────────────────────────────────────
+  {{os_platform}}    Operating system                example: darwin, linux, win32
+  {{node_env}}       NODE_ENV value                  example: development, production
+
+CONTEXT VARIABLES (from OpenCode):
+────────────────────────────────────────────────────────────────────────────────
+  {{project_name}}   Project directory name          example: TmuxCoder
+  {{project_path}}   Full project path               example: /Users/user/work/TmuxCoder
+  {{sessionDirectory}} Session directory             example: .opencode/sessions/abc123
+
+HANDLEBARS HELPERS (for logic in templates):
+────────────────────────────────────────────────────────────────────────────────
+  Conditionals:
+    {{#if variable}}...{{/if}}
+    {{#if variable}}...{{else}}...{{/if}}
+    {{#unless variable}}...{{/unless}}
+
+  Comparisons:
+    {{#if (eq a b)}}...{{/if}}              Equal
+    {{#if (ne a b)}}...{{/if}}              Not equal
+    {{#if (gt a b)}}...{{/if}}              Greater than
+    {{#if (lt a b)}}...{{/if}}              Less than
+
+  String operations:
+    {{uppercase variable}}
+    {{lowercase variable}}
+
+COMMON PATTERNS:
+────────────────────────────────────────────────────────────────────────────────
+  Branch check:
+    {{#if (eq git_branch "main")}}
+      ⚠️  You're on the main branch!
+    {{/if}}
+
+  Dirty state:
+    Working tree: {{#if git_dirty}}Modified{{else}}Clean{{/if}}
+
+  Environment-specific:
+    {{#if (eq node_env "production")}}
+      Production mode - be extra careful!
+    {{/if}}
+
+  Platform-specific:
+    {{#if (eq os_platform "darwin")}}
+      macOS-specific instructions...
+    {{/if}}
+
+CUSTOM VARIABLES:
+────────────────────────────────────────────────────────────────────────────────
+  Add your own by creating files in: .opencode/prompts/providers/
+
+  Example (.opencode/prompts/providers/my-vars.ts):
+    export const provider = async ({ env }) => ({
+      my_variable: env.MY_VAR || "default"
+    })
+
+  Then use in templates: {{my_variable}}
+
+CONFIGURATION:
+────────────────────────────────────────────────────────────────────────────────
+  Enable/disable providers in: .opencode/prompts/config.json
+
+  Example:
+    {
+      "providers": {
+        "git": { "enabled": true },
+        "time": { "enabled": false }
+      }
+    }
+
+DOCUMENTATION:
+────────────────────────────────────────────────────────────────────────────────
+  ⭐ Quick start:       docs/CONFIGURATION_GUIDE.md (START HERE!)
+  Variables reference:  docs/AVAILABLE_VARIABLES.md
+  Architecture:         docs/opencode-prompt-proxy.md
+  Example config:       .opencode/prompts/config.example.json
+
+TIPS:
+────────────────────────────────────────────────────────────────────────────────
+  1. Check template files for inline comments showing available variables
+  2. Use debug mode to see variable values: "debug": true in config.json
+  3. Cache settings can be tuned for faster git variable updates
+  4. Variables are resolved in parallel for best performance
+
+================================================================================
+Last updated: 2025-12-22
+Version: 1.0
+================================================================================

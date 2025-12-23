@@ -12,7 +12,6 @@ cmd/opencode-tmux/dist/opencode-tmux
 
 # Runtime files
 *.log
-.opencode/
 
 # macOS
 .DS_Store

@@ -1,0 +1,3 @@
+Test template for {{agent}}.
+Project: {{project_name}}
+Branch: {{git_branch}}

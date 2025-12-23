@@ -1,0 +1,8 @@
+{
+  "plugins": [
+    "./plugin/prompt-proxy.ts"
+  ],
+  "experimental": {
+    "pluginHooks": true
+  }
+}

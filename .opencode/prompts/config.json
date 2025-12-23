@@ -1,0 +1,14 @@
+{
+  "mode": "local",
+  "logging": {
+    "level": "info",
+    "enableMetrics": true,
+    "enableTracing": false
+  },
+  "cache": {
+    "enabled": true,
+    "ttl": 300,
+    "maxSize": 100
+  },
+  "debug": false
+}

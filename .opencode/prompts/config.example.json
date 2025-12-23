@@ -1,0 +1,47 @@
+{
+  "mode": "local",
+
+  "local": {
+    "templatesDir": ".opencode/prompts/templates",
+    "parametersPath": ".opencode/prompts/parameters.json",
+    "experimentsPath": ".opencode/prompts/experiments.json"
+  },
+
+  "cache": {
+    "enabled": true,
+    "ttl": 300,
+    "maxSize": 100
+  },
+
+  "logging": {
+    "level": "info",
+    "enableMetrics": true,
+    "enableTracing": false
+  },
+
+  "providers": {
+    "git": {
+      "enabled": true,
+      "timeout": 5000,
+      "cache": {
+        "git_root": 3600000,
+        "git_branch": 30000,
+        "git_dirty": 5000
+      }
+    },
+    "time": {
+      "enabled": true
+    },
+    "system": {
+      "enabled": true
+    },
+    "custom": {
+      "enabled": true,
+      "directory": ".opencode/prompts/providers",
+      "namespace": "",
+      "watch": false
+    }
+  },
+
+  "debug": false
+}
