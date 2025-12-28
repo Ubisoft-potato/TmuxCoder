@@ -41,6 +41,10 @@ type StartOptions struct {
 	NoAutoStart  bool   // Don't start panels automatically
 	DetachKeys   string // Custom detach key sequence
 	ReloadLayout bool   // Reload layout without restarting
+
+	// Prompt configuration
+	CustomSP          string // Custom system prompt (on/off/auto)
+	CleanDefaultEnvSP string // Clean default environment system prompt (on/off/auto)
 }
 
 // CmdStart implements the 'start' subcommand
@@ -77,6 +81,10 @@ func CmdStart(args []string) error {
 	fs.BoolVar(&opts.NoAutoStart, "no-auto-start", false, "Don't start panels automatically")
 	fs.StringVar(&opts.DetachKeys, "detach-keys", "", "Custom tmux detach key sequence")
 	fs.BoolVar(&opts.ReloadLayout, "reload-layout", false, "Reload layout without restarting")
+
+	// Prompt configuration flags
+	fs.StringVar(&opts.CustomSP, "custom-sp", os.Getenv("TMUXCODER_CUSTOM_SP"), "Enable custom system prompt (on/off/auto)")
+	fs.StringVar(&opts.CleanDefaultEnvSP, "clean-default-env-sp", os.Getenv("TMUXCODER_CLEAN_DEFAULT_ENV_SP"), "Clean default environment system prompt (on/off/auto)")
 
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, "Usage: opencode-tmux start [session-name] [options]\n\n")
@@ -143,6 +151,11 @@ func CmdStart(args []string) error {
 	// Handle reload-layout command (special case)
 	if opts.ReloadLayout {
 		return handleReloadLayout(opts)
+	}
+
+	// Apply prompt configuration environment variables
+	if err := applyPromptConfig(opts); err != nil {
+		return err
 	}
 
 	// Execute start
@@ -217,6 +230,49 @@ func resolveReloadConfigPath(opts *StartOptions) string {
 		return abs
 	}
 	return path
+}
+
+// applyPromptConfig sets environment variables for prompt configuration
+func applyPromptConfig(opts *StartOptions) error {
+	if err := applyToggleEnv("TMUXCODER_CUSTOM_SP", opts.CustomSP, "Custom SP"); err != nil {
+		return err
+	}
+	if err := applyToggleEnv("TMUXCODER_CLEAN_DEFAULT_ENV_SP", opts.CleanDefaultEnvSP, "Clean default env SP"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyToggleEnv sets or unsets an environment variable based on toggle value
+func applyToggleEnv(envName, value, label string) error {
+	if value == "" {
+		return nil
+	}
+
+	// Normalize value
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	switch normalized {
+	case "on", "true", "1", "enable", "enabled", "yes":
+		if err := os.Setenv(envName, "on"); err != nil {
+			return fmt.Errorf("failed to set %s: %w", envName, err)
+		}
+		fmt.Printf("%s forced on\n", label)
+	case "off", "false", "0", "disable", "disabled", "no":
+		if err := os.Setenv(envName, "off"); err != nil {
+			return fmt.Errorf("failed to set %s: %w", envName, err)
+		}
+		fmt.Printf("%s forced off\n", label)
+	case "auto":
+		if err := os.Unsetenv(envName); err != nil {
+			return fmt.Errorf("failed to unset %s: %w", envName, err)
+		}
+		fmt.Printf("%s override cleared (auto)\n", label)
+	default:
+		if normalized != "" {
+			return fmt.Errorf("invalid toggle value %q for %s (expected on/off/auto)", value, label)
+		}
+	}
+	return nil
 }
 
 // executeStart performs the actual start operation

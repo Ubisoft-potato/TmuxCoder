@@ -11,8 +11,8 @@ import {
   getAvailableVariables,
 } from "../lib/variable-providers"
 
-const PROMPT_PROXY_ENV = "TMUXCODER_PROMPT_PROXY"
-const MONKEY_PATCH_ENV = "TMUXCODER_MONKEY_PATCH"
+const CUSTOM_SP_ENV = "TMUXCODER_CUSTOM_SP"
+const CLEAN_DEFAULT_ENV_SP_ENV = "TMUXCODER_CLEAN_DEFAULT_ENV_SP"
 
 // ========== SystemPrompt Monkey Patch Support ==========
 let SystemPrompt: any = null
@@ -85,20 +85,22 @@ function applyMonkeyPatch(config: PromptConfig): boolean {
 
   if (patchConfig.interceptEnvironment && originalEnvironment) {
     SystemPrompt.environment = async function () {
+      const result: string[] = []
       logger.debug("SystemPrompt.environment() intercepted - returning empty", {
         module: "SystemPrompt",
       })
-      return []
+      return result
     }
     applied = true
   }
 
   if (patchConfig.interceptCustom && originalCustom) {
     SystemPrompt.custom = async function () {
+      const result: string[] = []
       logger.debug("SystemPrompt.custom() intercepted - returning empty", {
         module: "SystemPrompt",
       })
-      return []
+      return result
     }
     applied = true
   }
@@ -561,11 +563,11 @@ type EnvOverrideSummary = {
 function applyEnvironmentOverrides(config: PromptConfig): EnvOverrideSummary {
   const summary: EnvOverrideSummary = {}
 
-  const promptProxyOverride = parseEnvToggle(process.env[PROMPT_PROXY_ENV])
-  if (promptProxyOverride !== null) {
+  const customSPOverride = parseEnvToggle(process.env[CUSTOM_SP_ENV])
+  if (customSPOverride !== null) {
     const current = { ...(config.promptProxy ?? {}) }
-    current.enabled = promptProxyOverride
-    if (promptProxyOverride) {
+    current.enabled = customSPOverride
+    if (customSPOverride) {
       current.overrideSystem = true
       current.overrideParams = true
     } else {
@@ -573,16 +575,16 @@ function applyEnvironmentOverrides(config: PromptConfig): EnvOverrideSummary {
       current.overrideParams = false
     }
     config.promptProxy = current
-    summary.promptProxy = promptProxyOverride
+    summary.promptProxy = customSPOverride
   }
 
-  const monkeyPatchOverride = parseEnvToggle(process.env[MONKEY_PATCH_ENV])
-  if (monkeyPatchOverride !== null) {
+  const cleanDefaultEnvSPOverride = parseEnvToggle(process.env[CLEAN_DEFAULT_ENV_SP_ENV])
+  if (cleanDefaultEnvSPOverride !== null) {
     config.monkeyPatch = {
       ...(config.monkeyPatch ?? {}),
-      enabled: monkeyPatchOverride,
+      enabled: cleanDefaultEnvSPOverride,
     }
-    summary.monkeyPatch = monkeyPatchOverride
+    summary.monkeyPatch = cleanDefaultEnvSPOverride
   }
 
   if (summary.promptProxy !== undefined || summary.monkeyPatch !== undefined) {

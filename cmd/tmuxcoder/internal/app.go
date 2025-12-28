@@ -527,6 +527,15 @@ func (a *App) startDaemonBackground(sessionName string) error {
 	if a.mergeTarget != "" {
 		cmdArgs = append(cmdArgs, "--merge-into", a.mergeTarget)
 	}
+
+	// Pass prompt configuration flags
+	if customSP := os.Getenv("TMUXCODER_CUSTOM_SP"); customSP != "" {
+		cmdArgs = append(cmdArgs, "--custom-sp", customSP)
+	}
+	if cleanDefaultEnvSP := os.Getenv("TMUXCODER_CLEAN_DEFAULT_ENV_SP"); cleanDefaultEnvSP != "" {
+		cmdArgs = append(cmdArgs, "--clean-default-env-sp", cleanDefaultEnvSP)
+	}
+
 	cmd := exec.Command(a.binPath, cmdArgs...)
 	cmd.Env = os.Environ() // Inherit environment variables including OPENCODE_SERVER
 
