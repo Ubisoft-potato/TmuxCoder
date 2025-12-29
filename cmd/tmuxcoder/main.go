@@ -133,6 +133,7 @@ GLOBAL OPTIONS:
     --layout <path>              Override layout config (sets OPENCODE_TMUX_CONFIG)
     --custom-sp <mode>           Force custom system prompt (on/off/auto). Use --no-custom-sp as shorthand for off.
     --clean-default-env-sp <mode> Clean default environment system prompt (on/off/auto). Use --no-clean-default-env-sp for off.
+    --force-restart-server       Force restart OpenCode server if prompt config changes (default: reuse existing server)
 
 COMMANDS:
     (no command)           Smart start - auto-detect session and attach
@@ -185,10 +186,11 @@ ENVIRONMENT VARIABLES:
 }
 
 type globalOptions struct {
-	layoutPath         string
-	serverURL          string
-	customSP           string
-	cleanDefaultEnvSP  string
+	layoutPath          string
+	serverURL           string
+	customSP            string
+	cleanDefaultEnvSP   string
+	forceRestartServer  bool
 }
 
 func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
@@ -279,6 +281,11 @@ func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
 			continue
 		}
 
+		if arg == "--force-restart-server" {
+			opts.forceRestartServer = true
+			continue
+		}
+
 		remaining = append(remaining, arg)
 	}
 
@@ -354,6 +361,13 @@ func applyGlobalOptions(opts globalOptions) error {
 
 	if err := applyToggleOverride("TMUXCODER_CLEAN_DEFAULT_ENV_SP", opts.cleanDefaultEnvSP, "Clean default env SP"); err != nil {
 		return err
+	}
+
+	if opts.forceRestartServer {
+		if err := os.Setenv("TMUXCODER_FORCE_RESTART_SERVER", "true"); err != nil {
+			return fmt.Errorf("failed to set TMUXCODER_FORCE_RESTART_SERVER: %w", err)
+		}
+		fmt.Println("Force restart server enabled")
 	}
 
 	return nil
