@@ -73,6 +73,14 @@ Detach with the normal tmux shortcut (`Ctrl-b d`) and re-run `tmuxcoder` to jump
 | `tmuxcoder stop <name>` | Stop daemon only |
 | `tmuxcoder stop <name> --cleanup` | Stop daemon and kill tmux session |
 
+#### Advanced Flags
+
+| Flag | Description |
+|------|-------------|
+| `--force-restart-server` | Restart the OpenCode server (useful if it becomes unresponsive) |
+| `--custom-sp=on/off` | Toggle Prompt Proxy (Custom System Prompt) override |
+| `--clean-default-env-sp=on/off` | Toggle "Monkey Patch" to clean default OpenCode env vars from system prompt |
+
 Use `tmuxcoder --server http://host:port` to point at an existing OpenCode deployment, or export `OPENCODE_SERVER` in your shell.
 
 ### 5. Customize Layout & Config
@@ -98,7 +106,7 @@ Need the full architecture story later? See [docs/TMUX_ARCHITECTURE.md](docs/TMU
 
 TmuxCoder includes a **Prompt Proxy** plugin that allows you to customize system prompts and model parameters per project without modifying the core OpenCode.
 
-- **Project Isolation**: Define prompts in `.opencode/prompts/templates/`.
+- **Project Isolation**: Define prompts in `.opencode/prompts/templates/<agent>.txt`. The filename must match the agent name (e.g., `default.txt`).
 - **Dynamic Variables**: Use `{{git_branch}}`, `{{timestamp}}`, and custom variables in your templates.
 - **Model Parameters**: Override temperature, topP, and other settings via `parameters.json`.
 

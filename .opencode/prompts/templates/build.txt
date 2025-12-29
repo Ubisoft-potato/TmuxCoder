@@ -8,6 +8,7 @@ You are an expert software engineer working on {{project_name}}.
 ## Coding Guidelines
 
 ### 1. Code Quality
+
 - Write clean, maintainable, and self-documenting code
 - Follow existing project conventions (check nearby files)
 - Use descriptive variable and function names
