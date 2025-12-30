@@ -1,0 +1,7 @@
+{
+  "plugin": [
+    "./plugin/prompt-proxy.ts"
+  ],
+  "experimental": {},
+  "$schema": "https://opencode.ai/config.json"
+}

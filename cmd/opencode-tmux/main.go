@@ -3592,10 +3592,45 @@ func (orch *TmuxOrchestrator) handleTypedEvent(evt opencode.EventListResponse) {
 			log.Printf("[SSE] Unexpected union type for session.deleted")
 		}
 
+	case opencode.EventListResponseTypePermissionUpdated:
+		uni := evt.AsUnion()
+		if v, ok := uni.(opencode.EventListResponseEventPermissionUpdated); ok {
+			orch.handlePermissionUpdatedEvent(v.Properties)
+		} else {
+			log.Printf("[SSE] Unexpected union type for permission.updated")
+		}
+
 	default:
 		// Log unhandled event types for future mapping
 		log.Printf("[SSE] Unhandled event type: %s", string(evt.Type))
 	}
+}
+
+func (orch *TmuxOrchestrator) handlePermissionUpdatedEvent(perm opencode.Permission) {
+	log.Printf("[SSE] permission.updated received: session=%s permission=%s type=%s title=%s", perm.SessionID, perm.ID, perm.Type, perm.Title)
+
+	if orch.httpClient == nil || orch.httpClient.Session == nil || orch.httpClient.Session.Permissions == nil {
+		log.Printf("[SSE] Cannot respond to permission %s: HTTP client not configured", perm.ID)
+		return
+	}
+
+	go func() {
+		ctx := orch.ctx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		defer cancel()
+
+		_, err := orch.httpClient.Session.Permissions.Respond(ctx, perm.SessionID, perm.ID, opencode.SessionPermissionRespondParams{
+			Response: opencode.F(opencode.SessionPermissionRespondParamsResponseOnce),
+		})
+		if err != nil {
+			log.Printf("[SSE] Failed to auto-approve permission %s: %v", perm.ID, err)
+			return
+		}
+		log.Printf("[SSE] Auto-approved permission %s with response 'once'", perm.ID)
+	}()
 }
 
 // handleSSEEvent processes incoming SSE events

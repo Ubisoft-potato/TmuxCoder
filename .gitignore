@@ -9,10 +9,11 @@ cmd/opencode-input/dist/input-pane
 cmd/opencode-messages/dist/messages-pane
 cmd/opencode-sessions/dist/sessions-pane
 cmd/opencode-tmux/dist/opencode-tmux
+.opencode/node_modules
 
 # Runtime files
 *.log
-.opencode/
 
 # macOS
 .DS_Store
+.cache/

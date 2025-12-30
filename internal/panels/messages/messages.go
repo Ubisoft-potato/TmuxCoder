@@ -346,22 +346,19 @@ func (p *MessagesPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return p.handleStreamingUpdate(msg)
 
 	case RefreshTickMsg:
-		// Periodic refresh for pending messages
-		hasPendingMessages := false
-		for _, message := range p.messages {
-			if message.Status == "pending" {
-				hasPendingMessages = true
-				break
-			}
+		// Periodic refresh only while pending assistant messages exist
+		if !p.hasPendingMessages() {
+			log.Printf("[MESSAGES] No pending messages; refresh ticker idle")
+			return p, nil
 		}
 
-		if hasPendingMessages {
-			// Refresh messages from API to get latest status
-			return p, tea.Batch(p.refreshMessages(), p.startRefreshTicker())
+		refreshCmd := p.refreshMessages()
+		if refreshCmd == nil {
+			// No active session; keep checking so we restart once a session is selected
+			return p, p.startRefreshTicker()
 		}
 
-		// Continue the refresh cycle
-		return p, p.startRefreshTicker()
+		return p, tea.Batch(refreshCmd, p.startRefreshTicker())
 
 	default:
 		return p, nil
@@ -1031,7 +1028,7 @@ func (p *MessagesPanel) handleMessageEvent(event state.StateEvent) (tea.Model, t
 		}
 	}
 
-	if needsRefresh {
+	if needsRefresh && p.hasPendingMessages() {
 		cmds = append(cmds, tea.Tick(time.Millisecond, func(time.Time) tea.Msg {
 			return RefreshTickMsg{}
 		}))
@@ -1135,6 +1132,16 @@ func (p *MessagesPanel) handleStreamingUpdate(msg StreamingUpdateMsg) (tea.Model
 		}
 	}
 	return p, nil
+}
+
+// hasPendingMessages checks if any assistant messages still need completion polling.
+func (p *MessagesPanel) hasPendingMessages() bool {
+	for _, message := range p.messages {
+		if message.Status == "pending" {
+			return true
+		}
+	}
+	return false
 }
 
 // filterMessagesForSession filters messages for a specific session
@@ -1255,6 +1262,9 @@ func (p *MessagesPanel) renderMessages() string {
 
 		content += lineStyle.Render(line.Content) + "\n"
 	}
+
+	// Debug aid: dump the rendered content so we can inspect stuck/pending messages
+	log.Printf("[MESSAGES] Rendered content:\n%s", content)
 
 	return content
 }

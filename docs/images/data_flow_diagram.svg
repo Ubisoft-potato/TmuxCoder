@@ -1,0 +1,77 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 800 600">
+  <defs>
+    <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
+      <polygon points="0 0, 10 3.5, 0 7" fill="#333" />
+    </marker>
+  </defs>
+
+  <!-- Styles -->
+  <style>
+    .line { stroke: #999; stroke-width: 1; stroke-dasharray: 5,5; }
+    .participant { fill: #f0f0f0; stroke: #333; stroke-width: 2; rx: 5; ry: 5; }
+    .text { font-family: sans-serif; font-size: 14px; fill: #333; text-anchor: middle; }
+    .message { stroke: #333; stroke-width: 2; fill: none; marker-end: url(#arrowhead); }
+    .message-text { font-family: sans-serif; font-size: 12px; fill: #333; text-anchor: middle; background-color: white; }
+    .return { stroke: #333; stroke-width: 2; fill: none; stroke-dasharray: 5,5; marker-end: url(#arrowhead); }
+  </style>
+
+  <!-- Participants -->
+  <rect x="50" y="20" width="100" height="40" class="participant" />
+  <text x="100" y="45" class="text">User</text>
+  <line x1="100" y1="60" x2="100" y2="550" class="line" />
+
+  <rect x="200" y="20" width="100" height="40" class="participant" />
+  <text x="250" y="45" class="text">OpenCode</text>
+  <line x1="250" y1="60" x2="250" y2="550" class="line" />
+
+  <rect x="350" y="20" width="100" height="40" class="participant" />
+  <text x="400" y="45" class="text">Plugin</text>
+  <line x1="400" y1="60" x2="400" y2="550" class="line" />
+
+  <rect x="500" y="20" width="100" height="40" class="participant" />
+  <text x="550" y="45" class="text">Service</text>
+  <line x1="550" y1="60" x2="550" y2="550" class="line" />
+  
+  <rect x="650" y="20" width="100" height="40" class="participant" />
+  <text x="700" y="45" class="text">LLM</text>
+  <line x1="700" y1="60" x2="700" y2="550" class="line" />
+
+  <!-- Messages -->
+  
+  <!-- User -> OpenCode -->
+  <path d="M 100 100 L 250 100" class="message" />
+  <text x="175" y="95" class="message-text">Sends Message</text>
+
+  <!-- OpenCode -> Plugin -->
+  <path d="M 250 150 L 400 150" class="message" />
+  <text x="325" y="145" class="message-text">chat.message hook</text>
+
+  <!-- Plugin -> Service -->
+  <path d="M 400 200 L 550 200" class="message" />
+  <text x="475" y="195" class="message-text">POST /prompt</text>
+
+  <!-- Service -> Plugin (Return) -->
+  <path d="M 550 250 L 400 250" class="return" />
+  <text x="475" y="245" class="message-text">Returns {system, params}</text>
+
+  <!-- Plugin -> OpenCode -->
+  <path d="M 400 300 L 250 300" class="message" />
+  <text x="325" y="295" class="message-text">Update system prompt</text>
+
+  <!-- OpenCode -> Plugin (Params) -->
+  <path d="M 250 350 L 400 350" class="message" />
+  <text x="325" y="345" class="message-text">chat.params hook</text>
+
+  <!-- Plugin -> OpenCode (Update) -->
+  <path d="M 400 400 L 250 400" class="return" />
+  <text x="325" y="395" class="message-text">Update temp/topP</text>
+
+  <!-- OpenCode -> LLM -->
+  <path d="M 250 450 L 700 450" class="message" />
+  <text x="475" y="445" class="message-text">Stream Request</text>
+
+  <!-- LLM -> User -->
+  <path d="M 700 500 L 100 500" class="message" />
+  <text x="400" y="495" class="message-text">Response</text>
+
+</svg>

@@ -107,6 +107,84 @@ setup_opencode() {
     print_success "OpenCode setup complete"
 }
 
+# Setup prompt-core and .opencode dependencies
+setup_prompt_core() {
+    print_step "Setting up prompt-core and .opencode dependencies..."
+
+    cd "$SCRIPT_DIR"
+
+    # Install and build prompt-core
+    if [[ -d "prompt-core" ]]; then
+        if [[ ! -d "prompt-core/dist" ]]; then
+            print_step "Building prompt-core..."
+            cd prompt-core
+
+            # Install dependencies if needed
+            if [[ ! -d "node_modules" ]]; then
+                print_step "Installing prompt-core dependencies..."
+                bun install || {
+                    print_warning "bun install failed for prompt-core"
+                    return 1
+                }
+            fi
+
+            # Build the package
+            print_step "Building prompt-core package..."
+            bun run build || {
+                print_warning "Failed to build prompt-core"
+                return 1
+            }
+
+            cd "$SCRIPT_DIR"
+            print_success "prompt-core built successfully"
+        else
+            print_success "prompt-core already built"
+        fi
+    else
+        print_warning "prompt-core directory not found, skipping"
+    fi
+
+    # Setup .opencode dependencies
+    if [[ -d ".opencode" ]]; then
+        # Create package.json if it doesn't exist
+        if [[ ! -f ".opencode/package.json" ]]; then
+            print_step "Creating .opencode/package.json..."
+            cat > ".opencode/package.json" <<'EOF'
+{
+  "name": ".opencode",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.0.153",
+    "@tmuxcoder/prompt-core": "file:../prompt-core"
+  }
+}
+EOF
+            print_success "Created .opencode/package.json"
+        fi
+
+        # Install .opencode dependencies if needed
+        if [[ ! -d ".opencode/node_modules" ]]; then
+            print_step "Installing .opencode dependencies..."
+            cd .opencode
+            bun install || {
+                print_warning "Failed to install .opencode dependencies"
+                cd "$SCRIPT_DIR"
+                return 1
+            }
+            cd "$SCRIPT_DIR"
+            print_success ".opencode dependencies installed"
+        else
+            print_success ".opencode dependencies already installed"
+        fi
+    else
+        print_warning ".opencode directory not found, skipping"
+    fi
+
+    print_success "Prompt-core setup complete"
+}
+
 # Build binaries
 build_binaries() {
     print_step "Building binaries..."
@@ -286,6 +364,7 @@ main() {
     echo
     if [[ $REPLY =~ ^[Yy]$ ]] || [[ -z $REPLY ]]; then
         setup_opencode || print_warning "OpenCode setup had issues, but continuing..."
+        setup_prompt_core || print_warning "Prompt-core setup had issues, but continuing..."
     fi
 
     build_binaries

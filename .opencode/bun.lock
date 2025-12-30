@@ -1,0 +1,20 @@
+{
+  "lockfileVersion": 1,
+  "workspaces": {
+    "": {
+      "dependencies": {
+        "@opencode-ai/plugin": "1.0.153",
+        "@tmuxcoder/prompt-core": "file:../prompt-core",
+      },
+    },
+  },
+  "packages": {
+    "@opencode-ai/plugin": ["@opencode-ai/plugin@1.0.153", "", { "dependencies": { "@opencode-ai/sdk": "1.0.153", "zod": "4.1.8" } }, ""],
+
+    "@opencode-ai/sdk": ["@opencode-ai/sdk@1.0.153", "", {}, ""],
+
+    "@tmuxcoder/prompt-core": ["@tmuxcoder/prompt-core@file:../prompt-core", {}],
+
+    "zod": ["zod@4.1.8", "", {}, ""],
+  }
+}

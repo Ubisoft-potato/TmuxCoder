@@ -29,6 +29,7 @@ Built for developers who want a terminal-native AI coding assistant without leav
 - **Streaming Message Display** – Real-time SSE streaming of AI responses with markdown rendering and syntax highlighting
 - **Interactive Input Panel** – Send prompts with command mode and multiline support
 - **Smart State Persistence** – Version-based optimistic locking with JSON persistence and automatic conflict resolution
+- **Prompt Proxy** – Customize system prompts and model parameters per project with dynamic templates and git/time variables
 - **Manual Layout Reload** – Apply YAML config changes via `--reload-layout` flag without killing processes
 
 ## Screenshots
@@ -72,6 +73,14 @@ Detach with the normal tmux shortcut (`Ctrl-b d`) and re-run `tmuxcoder` to jump
 | `tmuxcoder stop <name>` | Stop daemon only |
 | `tmuxcoder stop <name> --cleanup` | Stop daemon and kill tmux session |
 
+#### Advanced Flags
+
+| Flag | Description |
+|------|-------------|
+| `--force-restart-server` | Restart the OpenCode server (useful if it becomes unresponsive) |
+| `--custom-sp=on/off` | Toggle Prompt Proxy (Custom System Prompt) override |
+| `--clean-default-env-sp=on/off` | Toggle "Monkey Patch" to clean default OpenCode env vars from system prompt |
+
 Use `tmuxcoder --server http://host:port` to point at an existing OpenCode deployment, or export `OPENCODE_SERVER` in your shell.
 
 ### 5. Customize Layout & Config
@@ -93,7 +102,17 @@ Use `tmuxcoder --server http://host:port` to point at an existing OpenCode deplo
 
 Need the full architecture story later? See [docs/TMUX_ARCHITECTURE.md](docs/TMUX_ARCHITECTURE.md).
 
-### 6. Logs, State & Troubleshooting
+### 6. Prompt Proxy & Templates
+
+TmuxCoder includes a **Prompt Proxy** plugin that allows you to customize system prompts and model parameters per project without modifying the core OpenCode.
+
+- **Project Isolation**: Define prompts in `.opencode/prompts/templates/<agent>.txt`. The filename must match the agent name (e.g., `default.txt`).
+- **Dynamic Variables**: Use `{{git_branch}}`, `{{timestamp}}`, and custom variables in your templates.
+- **Model Parameters**: Override temperature, topP, and other settings via `parameters.json`.
+
+For a deep dive into the architecture, configuration, and extension mechanisms, read the [Prompt Proxy Architecture Guide](docs/prompt-proxy-architecture.md).
+
+### 7. Logs, State & Troubleshooting
 
 - Panel + orchestrator logs: `~/.opencode/*.log`
 - State snapshots: `~/.opencode/states/<session>.json`

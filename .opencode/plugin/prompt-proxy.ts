@@ -1,0 +1,626 @@
+import type { Plugin } from "@opencode-ai/plugin"
+import { TmuxCoderPrompts } from "@tmuxcoder/prompt-core"
+import type { PromptConfig, PromptContext } from "@tmuxcoder/prompt-core"
+import { join, resolve } from "path"
+import { existsSync } from "fs"
+import { promptProxyLogger as logger, parseLogLevel } from "../lib/logger"
+import {
+  loadCustomProviders,
+  resolveContextVariables,
+  setProviderConfig,
+  getAvailableVariables,
+} from "../lib/variable-providers"
+
+const CUSTOM_SP_ENV = "TMUXCODER_CUSTOM_SP"
+const CLEAN_DEFAULT_ENV_SP_ENV = "TMUXCODER_CLEAN_DEFAULT_ENV_SP"
+
+// ========== SystemPrompt Monkey Patch Support ==========
+let SystemPrompt: any = null
+let originalEnvironment: any = null
+let originalCustom: any = null
+let monkeyPatchApplied = false
+
+try {
+  const systemModule = await import(
+    "../../packages/opencode/packages/opencode/src/session/system.ts"
+  )
+  SystemPrompt = systemModule.SystemPrompt
+  originalEnvironment = SystemPrompt?.environment
+  originalCustom = SystemPrompt?.custom
+  logger.debug("SystemPrompt module loaded for potential monkey patching", {
+    module: "SystemPrompt",
+  })
+} catch (error) {
+  logger.warn("Failed to import SystemPrompt module - monkey patch disabled", {
+    module: "SystemPrompt",
+    error: error instanceof Error ? error.message : String(error),
+  })
+}
+
+function restoreSystemPromptFunctions() {
+  if (SystemPrompt) {
+    if (originalEnvironment) {
+      SystemPrompt.environment = originalEnvironment
+    }
+    if (originalCustom) {
+      SystemPrompt.custom = originalCustom
+    }
+  }
+}
+
+function applyMonkeyPatch(config: PromptConfig): boolean {
+  const proxyControls = getProxyControls(config)
+
+  if (!proxyControls.overrideSystem) {
+    logger.info("Monkey patch skipped because overrideSystem is disabled", {
+      module: "SystemPrompt",
+    })
+    return false
+  }
+
+  const patchConfig = {
+    enabled: config.monkeyPatch?.enabled ?? true,
+    interceptEnvironment: config.monkeyPatch?.interceptEnvironment ?? true,
+    interceptCustom: config.monkeyPatch?.interceptCustom ?? true,
+  }
+
+  if (!patchConfig.enabled) {
+    restoreSystemPromptFunctions()
+    logger.info("Monkey patch disabled via configuration", {
+      module: "SystemPrompt",
+    })
+    return false
+  }
+
+  if (!SystemPrompt) {
+    logger.warn("SystemPrompt unavailable - cannot apply monkey patch", {
+      module: "SystemPrompt",
+    })
+    return false
+  }
+
+  restoreSystemPromptFunctions()
+
+  let applied = false
+
+  if (patchConfig.interceptEnvironment && originalEnvironment) {
+    SystemPrompt.environment = async function () {
+      const result: string[] = []
+      logger.debug("SystemPrompt.environment() intercepted - returning empty", {
+        module: "SystemPrompt",
+      })
+      return result
+    }
+    applied = true
+  }
+
+  if (patchConfig.interceptCustom && originalCustom) {
+    SystemPrompt.custom = async function () {
+      const result: string[] = []
+      logger.debug("SystemPrompt.custom() intercepted - returning empty", {
+        module: "SystemPrompt",
+      })
+      return result
+    }
+    applied = true
+  }
+
+  if (applied) {
+    logger.info("Monkey patch applied", {
+      module: "SystemPrompt",
+      interceptEnvironment: patchConfig.interceptEnvironment,
+      interceptCustom: patchConfig.interceptCustom,
+    })
+  } else {
+    logger.info("Monkey patch skipped - no interceptors enabled", {
+      module: "SystemPrompt",
+    })
+  }
+
+  return applied
+}
+// ========== End SystemPrompt Monkey Patch Support ==========
+
+export const PromptProxy: Plugin = async ({ project, directory, worktree, $ }) => {
+  // Find the directory containing .opencode/prompts
+  let configRoot = worktree
+
+  // First try to find git super-project root (for submodules)
+  try {
+    const result = await $`git -C ${worktree} rev-parse --show-superproject-working-tree`.text()
+    const superProject = result.trim()
+    if (superProject) {
+      configRoot = superProject
+      logger.info("Using super-project root", { configRoot })
+    }
+  } catch (error) {
+    // Not a submodule, continue
+  }
+
+  // If no super-project, search upwards for .opencode/prompts
+  if (configRoot === worktree) {
+    let current = worktree
+    let found = false
+
+    // Search up to 5 levels
+    for (let i = 0; i < 5; i++) {
+      const testPath = join(current, ".opencode/prompts")
+      if (existsSync(testPath)) {
+        configRoot = current
+        found = true
+        logger.info("Found .opencode/prompts", { configRoot })
+        break
+      }
+
+      const parent = join(current, "..")
+      if (parent === current) break // Reached root
+      current = parent
+    }
+
+    if (!found) {
+      const envConfigDir = process.env.OPENCODE_CONFIG_DIR
+      if (envConfigDir) {
+        const envRoot = envConfigDir.endsWith(".opencode")
+          ? resolve(envConfigDir, "..")
+          : envConfigDir
+        if (existsSync(join(envRoot, ".opencode/prompts"))) {
+          configRoot = envRoot
+          logger.info("Using OPENCODE_CONFIG_DIR parent for prompts", { configRoot })
+        }
+      }
+
+      if (configRoot === worktree) {
+        const envRoot = process.env.TMUXCODER_ROOT
+        if (envRoot && existsSync(join(envRoot, ".opencode/prompts"))) {
+          configRoot = envRoot
+          logger.info("Using TMUXCODER_ROOT for .opencode/prompts", { configRoot })
+        } else {
+          logger.warn(".opencode/prompts not found, using worktree", { worktree })
+        }
+      }
+    }
+  }
+
+  // Load configuration from found root
+  const config = await loadConfig(configRoot)
+  const envOverrides = applyEnvironmentOverrides(config)
+  const proxyControls = getProxyControls(config)
+  monkeyPatchApplied = applyMonkeyPatch(config)
+
+  logger.info("Plugin bootstrap", {
+    monkeyPatchActive: monkeyPatchApplied,
+    directory,
+    worktree,
+    envOverrides,
+    promptProxy: proxyControls,
+  })
+
+  // Configure providers based on config
+  if (config.providers) {
+    setProviderConfig(config.providers)
+    logger.info("Provider configuration applied", { providers: config.providers })
+  }
+
+  // Store configRoot for use in hooks
+  const projectRoot = configRoot
+
+  // Load custom providers (respecting config.providers.custom settings)
+  const customConfig = config.providers?.custom
+  const providersDir = customConfig?.directory
+    ? join(projectRoot, customConfig.directory)
+    : join(projectRoot, ".opencode/prompts/providers")
+
+  const customProviders = (customConfig?.enabled !== false)
+    ? await loadCustomProviders(providersDir)
+    : {}
+  const customProviderCount = Object.keys(customProviders).length
+
+  // Configure logger based on config
+  if (config.logging?.level) {
+    logger.setLevel(parseLogLevel(config.logging.level))
+  }
+
+  // Initialize SDK
+  const prompts = new TmuxCoderPrompts(config)
+  await prompts.initialize()
+
+  // Get available variables and log for user visibility
+  const availableVars = getAvailableVariables()
+
+  logger.info("Initialized", {
+    mode: config.mode,
+    templatesDir: config.local?.templatesDir,
+    cacheEnabled: config.cache?.enabled,
+    customProviders: customProviderCount,
+    providersEnabled: {
+      git: config.providers?.git?.enabled !== false,
+      time: config.providers?.time?.enabled !== false,
+      system: config.providers?.system?.enabled !== false,
+      custom: customConfig?.enabled !== false,
+    },
+  })
+
+  // Log available variables for easy discovery
+  logger.info("📋 Available template variables", {
+    total: availableVars.total + customProviderCount,
+    builtIn: availableVars.builtIn,
+    customNamespace: availableVars.customNamespace,
+    customProviders: Object.keys(customProviders),
+  })
+
+  logger.info("💡 Quick tips", {
+    variablesReference: ".opencode/prompts/VARIABLES.txt",
+    templateComments: "Check .opencode/prompts/templates/*.txt for inline help",
+    fullDocumentation: "docs/AVAILABLE_VARIABLES.md",
+  })
+
+  // Create parameter cache (for passing data between hooks)
+  const parameterCache = new Map<string, any>()
+
+  return {
+    /**
+     * Hook 1: Customize system prompt
+     */
+    "chat.message": async (input, output) => {
+      if (!proxyControls.enabled || !proxyControls.overrideSystem) {
+        logger.info("Prompt Proxy system override disabled - skipping chat.message hook")
+        return
+      }
+
+      const { sessionID, agent = "default", model } = input
+      const sessionIDShort = sessionID.substring(0, 8)
+
+      logger.debug("chat.message hook called", {
+        sessionID: sessionIDShort,
+        agent,
+        modelID: model?.modelID,
+      })
+
+      // Overall timeout for the entire hook (15 seconds)
+      const hookTimeout = 15000
+
+      const executeHook = async () => {
+        // Resolve custom variables (built-ins + custom)
+        const customContext = await resolveContextVariables(
+          {
+            worktree: projectRoot,
+            $: $,
+            env: process.env,
+            sessionID,
+          },
+          customProviders
+        )
+
+        // Build context
+        const context: PromptContext = {
+          agent,
+          sessionID,
+          project: {
+            name: getProjectName(projectRoot),
+            path: projectRoot,
+          },
+          model: model
+            ? {
+              providerID: model.providerID,
+              modelID: model.modelID,
+            }
+            : undefined,
+          environment: {
+            NODE_ENV: process.env.NODE_ENV,
+            sessionDirectory: directory,
+            ...customContext,
+          },
+        }
+
+        logger.debug("Context built", {
+          sessionID: sessionIDShort,
+          projectName: context.project?.name,
+          projectPath: context.project?.path,
+          gitBranch: customContext.git_branch,
+          gitDirty: customContext.git_dirty,
+          customProviders: customProviderCount,
+          sessionDirectory: directory,
+        })
+
+        // Resolve Prompt with timeout
+        const startTime = Date.now()
+        const resolvePromise = prompts.resolve(context)
+        const resolved = await Promise.race([
+          resolvePromise,
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Prompt resolution timeout")), 10000)
+          )
+        ]) as Awaited<ReturnType<typeof prompts.resolve>>
+        const resolutionTime = Date.now() - startTime
+
+        const userPromptFull = extractUserPrompt(output.parts)
+
+        logger.info("Prompt resolved", {
+          sessionID: sessionIDShort,
+          templateID: resolved.metadata.templateID,
+          variantID: resolved.metadata.variantID,
+          systemPromptLength: resolved.system.length,
+          userPromptLength: userPromptFull.length,
+          resolverType: resolved.metadata.resolverType,
+        })
+
+        if (config.debug) {
+          logger.debug("Prompt details", {
+            sessionID: sessionIDShort,
+            systemPromptFull: resolved.system,
+            userPromptFull,
+            parameters: resolved.parameters,
+            metadata: resolved.metadata,
+          })
+        }
+
+        // Performance metric
+        logger.metric("prompt_resolution_time", resolutionTime, "ms", {
+          sessionID: sessionIDShort,
+          templateID: resolved.metadata.templateID,
+        })
+
+        // Apply to output
+        output.message.system = resolved.system
+
+        logger.info("System prompt overridden successfully", {
+          sessionID: sessionIDShort,
+          agent,
+          templateID: resolved.metadata.templateID,
+        })
+
+        // Cache parameters for chat.params hook
+        parameterCache.set(sessionID, resolved.parameters)
+      }
+
+      // Race between hook execution and timeout
+      try {
+        await Promise.race([
+          executeHook(),
+          new Promise((_, reject) =>
+            setTimeout(() => reject(new Error("Hook execution timeout")), hookTimeout)
+          )
+        ])
+      } catch (error) {
+        logger.error("Hook timeout or fatal error", error instanceof Error ? error : undefined, {
+          sessionID: sessionIDShort,
+          hookTimeout,
+        })
+        // Continue without applying custom prompt
+      }
+    },
+
+    /**
+     * Hook 2: Customize model parameters
+     */
+    "chat.params": async (input, output) => {
+      if (!proxyControls.enabled || !proxyControls.overrideParams) {
+        return
+      }
+
+      const { sessionID } = input
+      const sessionIDShort = sessionID.substring(0, 8)
+
+      try {
+        const params = parameterCache.get(sessionID)
+
+        if (params) {
+          if (params.temperature !== undefined) {
+            output.temperature = params.temperature
+          }
+          if (params.topP !== undefined) {
+            output.topP = params.topP
+          }
+          if (params.options) {
+            output.options = {
+              ...output.options,
+              ...params.options,
+            }
+          }
+
+          logger.debug("Applied parameters", {
+            sessionID: sessionIDShort,
+            temperature: params.temperature,
+            topP: params.topP,
+            hasOptions: !!params.options,
+          })
+        }
+      } catch (error) {
+        logger.error("Error in chat.params hook", error instanceof Error ? error : undefined, {
+          sessionID: sessionIDShort,
+        })
+      }
+    },
+
+    /**
+     * Hook 3: Listen to events (optional)
+     */
+    event: async ({ event }) => {
+      if (!proxyControls.enabled || !proxyControls.overrideParams) {
+        return
+      }
+
+      if (event.type === "session.completed" || event.type === "session.deleted") {
+        const sessionID = (event as any).sessionID
+        if (sessionID) {
+          const sessionIDShort = sessionID.substring(0, 8)
+          parameterCache.delete(sessionID)
+          prompts.clearSessionCache(sessionID)
+          logger.debug("Session cleanup", {
+            sessionID: sessionIDShort,
+            eventType: event.type,
+          })
+        }
+      }
+    },
+  }
+}
+
+type BasicTextPart = {
+  type?: string
+  text?: string
+  synthetic?: boolean
+}
+
+function extractUserPrompt(parts: BasicTextPart[] = []): string {
+  if (!Array.isArray(parts) || parts.length === 0) {
+    return ""
+  }
+
+  return parts
+    .filter((part): part is BasicTextPart & { text: string } =>
+      part?.type === "text" && !part.synthetic && typeof part.text === "string"
+    )
+    .map((part) => part.text.trim())
+    .filter((text) => text.length > 0)
+    .join("\n\n")
+}
+
+/**
+ * Load configuration file
+ */
+async function loadConfig(directory: string): Promise<PromptConfig> {
+  const configPath = join(directory, ".opencode/prompts/config.json")
+
+  const defaultConfig: PromptConfig = {
+    mode: "local",
+    promptProxy: {
+      enabled: true,
+      overrideSystem: true,
+      overrideParams: true,
+    },
+    monkeyPatch: {
+      enabled: true,
+      interceptEnvironment: true,
+      interceptCustom: true,
+    },
+    local: {
+      templatesDir: join(directory, ".opencode/prompts/templates"),
+      parametersPath: join(directory, ".opencode/prompts/parameters.json"),
+    },
+    cache: {
+      enabled: true,
+      ttl: 300,
+      maxSize: 100,
+    },
+    debug: process.env.TMUXCODER_DEBUG === "true",
+  }
+
+  if (existsSync(configPath)) {
+    try {
+      const content = await Bun.file(configPath).text()
+      const userConfig = JSON.parse(content)
+
+      return {
+        ...defaultConfig,
+        ...userConfig,
+        local: {
+          ...defaultConfig.local,
+          ...userConfig.local,
+        },
+        cache: {
+          ...defaultConfig.cache,
+          ...userConfig.cache,
+        },
+        promptProxy: {
+          ...defaultConfig.promptProxy,
+          ...userConfig.promptProxy,
+        },
+        monkeyPatch: {
+          ...defaultConfig.monkeyPatch,
+          ...userConfig.monkeyPatch,
+        },
+        logging: {
+          ...defaultConfig.logging,
+          ...userConfig.logging,
+        },
+      }
+    } catch (error) {
+      logger.warn("Failed to load config, using defaults", {
+        configPath,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+
+  return defaultConfig
+}
+
+
+/**
+ * Extract project name from directory path
+ */
+function getProjectName(dirPath: string): string {
+  const parts = dirPath.split("/")
+  return parts[parts.length - 1] || "unknown"
+}
+
+type EnvOverrideSummary = {
+  promptProxy?: boolean
+  monkeyPatch?: boolean
+}
+
+function applyEnvironmentOverrides(config: PromptConfig): EnvOverrideSummary {
+  const summary: EnvOverrideSummary = {}
+
+  const customSPOverride = parseEnvToggle(process.env[CUSTOM_SP_ENV])
+  if (customSPOverride !== null) {
+    const current = { ...(config.promptProxy ?? {}) }
+    current.enabled = customSPOverride
+    if (customSPOverride) {
+      current.overrideSystem = true
+      current.overrideParams = true
+    } else {
+      current.overrideSystem = false
+      current.overrideParams = false
+    }
+    config.promptProxy = current
+    summary.promptProxy = customSPOverride
+  }
+
+  const cleanDefaultEnvSPOverride = parseEnvToggle(process.env[CLEAN_DEFAULT_ENV_SP_ENV])
+  if (cleanDefaultEnvSPOverride !== null) {
+    config.monkeyPatch = {
+      ...(config.monkeyPatch ?? {}),
+      enabled: cleanDefaultEnvSPOverride,
+    }
+    summary.monkeyPatch = cleanDefaultEnvSPOverride
+  }
+
+  if (summary.promptProxy !== undefined || summary.monkeyPatch !== undefined) {
+    logger.info("Environment overrides detected", summary)
+  }
+
+  return summary
+}
+
+function parseEnvToggle(value?: string | null): boolean | null {
+  if (!value) return null
+
+  const normalized = value.trim().toLowerCase()
+  if (normalized === "" || normalized === "auto") {
+    return null
+  }
+
+  if (["on", "true", "1", "yes", "enable", "enabled"].includes(normalized)) {
+    return true
+  }
+
+  if (["off", "false", "0", "no", "disable", "disabled"].includes(normalized)) {
+    return false
+  }
+
+  logger.warn("Ignoring invalid environment toggle", {
+    value,
+  })
+  return null
+}
+
+function getProxyControls(config: PromptConfig) {
+  const enabled = config.promptProxy?.enabled !== false
+  return {
+    enabled,
+    overrideSystem: enabled && config.promptProxy?.overrideSystem !== false,
+    overrideParams: enabled && config.promptProxy?.overrideParams !== false,
+  }
+}

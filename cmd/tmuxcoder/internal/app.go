@@ -56,6 +56,17 @@ func NewApp() *App {
 		os.Exit(1)
 	}
 
+	// Propagate project metadata to child processes
+	if os.Getenv("TMUXCODER_ROOT") == "" {
+		_ = os.Setenv("TMUXCODER_ROOT", projectRoot)
+	}
+	configDir := filepath.Join(projectRoot, ".opencode")
+	if os.Getenv("OPENCODE_CONFIG_DIR") == "" {
+		if info, err := os.Stat(configDir); err == nil && info.IsDir() {
+			_ = os.Setenv("OPENCODE_CONFIG_DIR", configDir)
+		}
+	}
+
 	return &App{
 		projectRoot:    projectRoot,
 		binPath:        binPath,
@@ -516,6 +527,15 @@ func (a *App) startDaemonBackground(sessionName string) error {
 	if a.mergeTarget != "" {
 		cmdArgs = append(cmdArgs, "--merge-into", a.mergeTarget)
 	}
+
+	// Pass prompt configuration flags
+	if customSP := os.Getenv("TMUXCODER_CUSTOM_SP"); customSP != "" {
+		cmdArgs = append(cmdArgs, "--custom-sp", customSP)
+	}
+	if cleanDefaultEnvSP := os.Getenv("TMUXCODER_CLEAN_DEFAULT_ENV_SP"); cleanDefaultEnvSP != "" {
+		cmdArgs = append(cmdArgs, "--clean-default-env-sp", cleanDefaultEnvSP)
+	}
+
 	cmd := exec.Command(a.binPath, cmdArgs...)
 	cmd.Env = os.Environ() // Inherit environment variables including OPENCODE_SERVER
 
@@ -560,20 +580,46 @@ func (a *App) ensureServer() error {
 	}
 
 	url := fmt.Sprintf("http://%s:%s", defaultServerHost, port)
-	if a.serverReachable(url, 500*time.Millisecond) {
-		fmt.Printf("Reusing OpenCode server at %s\n", url)
-		a.serverURL = url
-		_ = os.Setenv("OPENCODE_SERVER", url)
-		return nil
+
+	// Check if server is already running
+	serverRunning := a.serverReachable(url, 500*time.Millisecond)
+
+	// Check if force restart is needed
+	forceRestart := os.Getenv("TMUXCODER_FORCE_RESTART_SERVER") == "true"
+	hasPromptConfig := os.Getenv("TMUXCODER_CUSTOM_SP") != "" || os.Getenv("TMUXCODER_CLEAN_DEFAULT_ENV_SP") != ""
+
+	if serverRunning {
+		// If force restart is requested with prompt config
+		if forceRestart && hasPromptConfig {
+			fmt.Println("Force restarting OpenCode server to apply new prompt configuration...")
+
+			// Try to stop existing server by killing the bun process
+			if err := a.killExistingServer(port); err != nil {
+				fmt.Printf("Warning: Failed to stop existing server: %v\n", err)
+				fmt.Println("Please manually stop the server and retry.")
+				fmt.Println("To manually stop: kill the 'bun' process running on port " + port)
+				return fmt.Errorf("failed to restart server: %w", err)
+			}
+			serverRunning = false
+		} else {
+			// Normal reuse of existing server
+			fmt.Printf("Reusing OpenCode server at %s\n", url)
+			a.serverURL = url
+			_ = os.Setenv("OPENCODE_SERVER", url)
+			return nil
+		}
 	}
 
-	if err := a.startServerProcess(defaultServerHost, port, url); err != nil {
-		return err
-	}
+	// Start new server (if not running or was stopped)
+	if !serverRunning {
+		if err := a.startServerProcess(defaultServerHost, port, url); err != nil {
+			return err
+		}
 
-	if err := a.waitForServerReady(url, 15*time.Second); err != nil {
-		a.stopServer()
-		return fmt.Errorf("failed to start OpenCode server: %w", err)
+		if err := a.waitForServerReady(url, 15*time.Second); err != nil {
+			a.stopServer()
+			return fmt.Errorf("failed to start OpenCode server: %w", err)
+		}
 	}
 
 	a.serverURL = url
@@ -613,6 +659,18 @@ func (a *App) startServerProcess(host, port, url string) error {
 	cmd.Stderr = logFile
 	cmd.Env = os.Environ()
 
+	// Add .opencode/node_modules to NODE_PATH so bun can resolve plugin dependencies
+	opencodeNodeModules := filepath.Join(a.projectRoot, ".opencode", "node_modules")
+	if info, err := os.Stat(opencodeNodeModules); err == nil && info.IsDir() {
+		nodePath := os.Getenv("NODE_PATH")
+		if nodePath != "" {
+			nodePath = opencodeNodeModules + string(os.PathListSeparator) + nodePath
+		} else {
+			nodePath = opencodeNodeModules
+		}
+		cmd.Env = append(cmd.Env, "NODE_PATH="+nodePath)
+	}
+
 	if err := cmd.Start(); err != nil {
 		logFile.Close()
 		return fmt.Errorf("failed to start OpenCode server: %w", err)
@@ -627,8 +685,11 @@ func (a *App) startServerProcess(host, port, url string) error {
 
 func (a *App) waitForServerReady(url string, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
+	// Use longer timeout for individual health checks to allow server initialization
+	// Server needs time to load plugins, configs, and LSP servers on first request
+	healthCheckTimeout := 5 * time.Second
 	for time.Now().Before(deadline) {
-		if a.serverReachable(url, time.Second) {
+		if a.serverReachable(url, healthCheckTimeout) {
 			return nil
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -681,6 +742,71 @@ func (a *App) stopServer() {
 	}
 	a.serverCmd = nil
 	a.serverOwned = false
+}
+
+// killExistingServer kills the bun process running on the specified port
+func (a *App) killExistingServer(port string) error {
+	// Use lsof to find the process listening on the port
+	cmd := exec.Command("lsof", "-ti", fmt.Sprintf(":%s", port))
+	output, err := cmd.Output()
+	if err != nil {
+		return fmt.Errorf("failed to find process on port %s: %w", port, err)
+	}
+
+	pidStr := strings.TrimSpace(string(output))
+	if pidStr == "" {
+		return fmt.Errorf("no process found on port %s", port)
+	}
+
+	// Split by newlines in case there are multiple PIDs (parent and child processes)
+	pids := strings.Split(pidStr, "\n")
+	if len(pids) == 0 {
+		return fmt.Errorf("no process found on port %s", port)
+	}
+
+	// Use the first PID (usually the main process)
+	firstPidStr := strings.TrimSpace(pids[0])
+	pid, err := strconv.Atoi(firstPidStr)
+	if err != nil {
+		return fmt.Errorf("invalid PID: %s", firstPidStr)
+	}
+
+	if len(pids) > 1 {
+		fmt.Printf("Found %d processes on port %s, killing main process (PID: %d)\n", len(pids), port, pid)
+	}
+
+	// Find the process
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("failed to find process %d: %w", pid, err)
+	}
+
+	fmt.Printf("Stopping OpenCode server process (PID: %d)...\n", pid)
+
+	// Try graceful shutdown with SIGTERM
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		return fmt.Errorf("failed to send SIGTERM to process %d: %w", pid, err)
+	}
+
+	// Wait up to 3 seconds for graceful shutdown
+	for i := 0; i < 30; i++ {
+		time.Sleep(100 * time.Millisecond)
+		// Check if process is still running
+		if err := proc.Signal(syscall.Signal(0)); err != nil {
+			// Process is dead
+			fmt.Println("OpenCode server stopped gracefully")
+			return nil
+		}
+	}
+
+	// Force kill if still running
+	fmt.Println("Server didn't stop gracefully, forcing kill...")
+	if err := proc.Kill(); err != nil {
+		return fmt.Errorf("failed to kill process %d: %w", pid, err)
+	}
+
+	fmt.Println("OpenCode server killed")
+	return nil
 }
 
 // waitForSessionReady waits for a tmux session to be ready

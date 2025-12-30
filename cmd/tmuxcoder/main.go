@@ -130,7 +130,10 @@ USAGE:
     tmuxcoder [GLOBAL OPTIONS] [COMMAND] [OPTIONS]
 
 GLOBAL OPTIONS:
-    --layout <path>         Override layout config (sets OPENCODE_TMUX_CONFIG)
+    --layout <path>              Override layout config (sets OPENCODE_TMUX_CONFIG)
+    --custom-sp <mode>           Force custom system prompt (on/off/auto). Use --no-custom-sp as shorthand for off.
+    --clean-default-env-sp <mode> Clean default environment system prompt (on/off/auto). Use --no-clean-default-env-sp for off.
+    --force-restart-server       Force restart OpenCode server if prompt config changes (default: reuse existing server)
 
 COMMANDS:
     (no command)           Smart start - auto-detect session and attach
@@ -172,17 +175,22 @@ BEHAVIOR:
     - Reuses existing sessions intelligently
 
 ENVIRONMENT VARIABLES:
-    TMUXCODER_ROOT            Project root directory
-    OPENCODE_SERVER           OpenCode API server URL
-    OPENCODE_TMUX_CONFIG      Config file (default: ~/.opencode/tmux.yaml)
+    TMUXCODER_ROOT                   Project root directory
+    OPENCODE_SERVER                  OpenCode API server URL
+    OPENCODE_TMUX_CONFIG             Config file (default: ~/.opencode/tmux.yaml)
+    TMUXCODER_CUSTOM_SP              Force custom system prompt (on/off)
+    TMUXCODER_CLEAN_DEFAULT_ENV_SP   Clean default environment system prompt (on/off)
 
 `
 	fmt.Print(help)
 }
 
 type globalOptions struct {
-	layoutPath string
-	serverURL  string
+	layoutPath          string
+	serverURL           string
+	customSP            string
+	cleanDefaultEnvSP   string
+	forceRestartServer  bool
 }
 
 func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
@@ -237,10 +245,84 @@ func parseGlobalOptions(args []string) ([]string, globalOptions, error) {
 			continue
 		}
 
+		if arg == "--custom-sp" || strings.HasPrefix(arg, "--custom-sp=") {
+			value, err := getFlagValue(args, &i, arg, "--custom-sp")
+			if err != nil {
+				return nil, opts, err
+			}
+			normalized, err := normalizeToggleValue(value)
+			if err != nil {
+				return nil, opts, err
+			}
+			opts.customSP = normalized
+			continue
+		}
+
+		if arg == "--no-custom-sp" {
+			opts.customSP = "off"
+			continue
+		}
+
+		if arg == "--clean-default-env-sp" || strings.HasPrefix(arg, "--clean-default-env-sp=") {
+			value, err := getFlagValue(args, &i, arg, "--clean-default-env-sp")
+			if err != nil {
+				return nil, opts, err
+			}
+			normalized, err := normalizeToggleValue(value)
+			if err != nil {
+				return nil, opts, err
+			}
+			opts.cleanDefaultEnvSP = normalized
+			continue
+		}
+
+		if arg == "--no-clean-default-env-sp" {
+			opts.cleanDefaultEnvSP = "off"
+			continue
+		}
+
+		if arg == "--force-restart-server" {
+			opts.forceRestartServer = true
+			continue
+		}
+
 		remaining = append(remaining, arg)
 	}
 
 	return remaining, opts, nil
+}
+
+func getFlagValue(args []string, index *int, arg, flag string) (string, error) {
+	if arg == flag {
+		if *index+1 >= len(args) {
+			return "", fmt.Errorf("%s requires a value", flag)
+		}
+		value := args[*index+1]
+		*index++
+		return value, nil
+	}
+	value := strings.TrimPrefix(arg, flag+"=")
+	if value == "" {
+		return "", fmt.Errorf("%s requires a value", flag)
+	}
+	return value, nil
+}
+
+func normalizeToggleValue(raw string) (string, error) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
+	case "on", "true", "1", "enable", "enabled", "yes":
+		return "on", nil
+	case "off", "false", "0", "disable", "disabled", "no":
+		return "off", nil
+	case "auto":
+		return "auto", nil
+	default:
+		if value == "" {
+			return "", fmt.Errorf("toggle value cannot be empty (expected on/off/auto)")
+		}
+		return "", fmt.Errorf("invalid toggle value %q (expected on/off/auto)", raw)
+	}
 }
 
 func applyGlobalOptions(opts globalOptions) error {
@@ -273,6 +355,41 @@ func applyGlobalOptions(opts globalOptions) error {
 		fmt.Printf("Using OpenCode server: %s\n", opts.serverURL)
 	}
 
+	if err := applyToggleOverride("TMUXCODER_CUSTOM_SP", opts.customSP, "Custom SP"); err != nil {
+		return err
+	}
+
+	if err := applyToggleOverride("TMUXCODER_CLEAN_DEFAULT_ENV_SP", opts.cleanDefaultEnvSP, "Clean default env SP"); err != nil {
+		return err
+	}
+
+	if opts.forceRestartServer {
+		if err := os.Setenv("TMUXCODER_FORCE_RESTART_SERVER", "true"); err != nil {
+			return fmt.Errorf("failed to set TMUXCODER_FORCE_RESTART_SERVER: %w", err)
+		}
+		fmt.Println("Force restart server enabled")
+	}
+
+	return nil
+}
+
+func applyToggleOverride(envName, value, label string) error {
+	if value == "" {
+		return nil
+	}
+
+	if value == "auto" {
+		if err := os.Unsetenv(envName); err != nil {
+			return fmt.Errorf("failed to unset %s: %w", envName, err)
+		}
+		fmt.Printf("%s override cleared (auto)\n", label)
+		return nil
+	}
+
+	if err := os.Setenv(envName, value); err != nil {
+		return fmt.Errorf("failed to set %s: %w", envName, err)
+	}
+	fmt.Printf("%s forced %s\n", label, value)
 	return nil
 }
 

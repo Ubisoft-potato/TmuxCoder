@@ -294,6 +294,7 @@ type InputPanel struct {
 	// Current model information
 	currentProvider string // Current selected provider
 	currentModel    string // Current selected model
+	currentAgent    string // Current selected agent
 	promptTimeout   time.Duration
 }
 
@@ -473,7 +474,8 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// Update current model information
 			p.currentProvider = msg.State.Provider
 			p.currentModel = msg.State.Model
-			log.Printf("[INPUT] Model info loaded: Provider='%s', Model='%s'", p.currentProvider, p.currentModel)
+			p.currentAgent = msg.State.Agent
+			log.Printf("[INPUT] Model info loaded: Provider='%s', Model='%s', Agent='%s'", p.currentProvider, p.currentModel, p.currentAgent)
 		} else {
 			log.Printf("[INPUT] No state available, using defaults")
 			// Initialize with default values
@@ -488,6 +490,7 @@ func (p *InputPanel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			p.historyIndex = -1
 			p.currentProvider = ""
 			p.currentModel = ""
+			p.currentAgent = ""
 		}
 		return p, nil
 
@@ -1472,14 +1475,30 @@ func (p *InputPanel) makeSendCommand(message, sessionID string) tea.Cmd {
 			}
 			defer cancel()
 
-			response, err := p.client.Session.Prompt(ctx, session, opencode.SessionPromptParams{
+			// Get current agent from cached state
+			var agent string
+			if p.cachedState != nil && p.cachedState.Agent != "" {
+				agent = p.cachedState.Agent
+			}
+
+			params := opencode.SessionPromptParams{
 				Parts: opencode.F([]opencode.SessionPromptParamsPartUnion{
 					opencode.TextPartInputParam{
 						Text: opencode.F(userMsg),
 						Type: opencode.F(opencode.TextPartInputTypeText),
 					},
 				}),
-			})
+			}
+
+			// Include agent if available
+			if agent != "" {
+				params.Agent = opencode.F(agent)
+				log.Printf("[INPUT] Sending message with agent: %s", agent)
+			} else {
+				log.Printf("[INPUT] Sending message without agent (will use default)")
+			}
+
+			response, err := p.client.Session.Prompt(ctx, session, params)
 
 			if err != nil {
 				if errors.Is(err, context.DeadlineExceeded) && wait > 0 {
@@ -2111,6 +2130,13 @@ func (p *InputPanel) changeModel(provider, model string) tea.Cmd {
 
 func (p *InputPanel) changeAgent(agent string) tea.Cmd {
 	return func() tea.Msg {
+		// Update local state immediately for UI responsiveness
+		p.currentAgent = agent
+		if p.cachedState != nil {
+			p.cachedState.Agent = agent
+		}
+		log.Printf("[INPUT] Agent changed locally to: %s", agent)
+
 		update := types.StateUpdate{
 			Type:        types.AgentChanged,
 			Payload:     types.AgentChangePayload{Agent: agent},
@@ -2643,13 +2669,16 @@ func (p *InputPanel) renderInput() string {
 
 	// Mode indicator with current model information
 	modeText := fmt.Sprintf("Mode: %s", p.mode)
+	if p.currentAgent != "" {
+		modeText += fmt.Sprintf(" | Agent: %s", p.currentAgent)
+	}
 	if p.currentProvider != "" && p.currentModel != "" {
 		modeText += fmt.Sprintf(" | Model: %s/%s", p.currentProvider, p.currentModel)
 	}
 	if len(p.history) > 0 {
 		modeText += fmt.Sprintf(" | History: %d items", len(p.history))
 	}
-	log.Printf("[INPUT] Rendering mode text: '%s' (Provider='%s', Model='%s')", modeText, p.currentProvider, p.currentModel)
+	log.Printf("[INPUT] Rendering mode text: '%s' (Agent='%s', Provider='%s', Model='%s')", modeText, p.currentAgent, p.currentProvider, p.currentModel)
 
 	modeContent := styles.NewStyle().
 		Foreground(t.TextMuted()).
